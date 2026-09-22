@@ -135,7 +135,8 @@ export async function routeTask(
   const eligible = project.specialists.filter((specialist) => specialist.tools.some((tool) =>
     ["list_files", "read_file", "search_files"].includes(tool) ||
     (tool === "run_command" ? context.permissions?.commands : context.permissions?.write)));
-  if (project.config.jev.routeSpecialists !== false && !baseline.specialistId && eligible.length) {
+  if (project.config.jev.routeSpecialists !== false && project.config.limits.maxSpecialistRuns > 0 &&
+    !baseline.specialistId && eligible.length) {
     questions.delegation = {
       type: "choice",
       instructions: "Should a specialist investigate before the main coding agent handles this task? Delegate only for a clear benefit that outweighs a second context and handoff. Select abstain if context is insufficient.",

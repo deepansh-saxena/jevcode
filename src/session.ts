@@ -1,10 +1,11 @@
 import { constants } from "node:fs";
-import { lstat, mkdir, open } from "node:fs/promises";
+import { lstat, mkdir, open, readdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { Project } from "./registry.js";
 import { readText, resolvePath } from "./workspace.js";
 import { toolCallSchema, type CodingModel, type Message } from "./llm.js";
+import { isMissing } from "./errors.js";
 
 const snapshotSchema = z.object({
   version: z.literal(1), root: z.string(), provider: z.string(), model: z.string(),
@@ -26,6 +27,26 @@ async function sessionDirectory(project: Project, create: boolean): Promise<stri
     }
   }
   return directory;
+}
+
+export async function listSessions(project: Project): Promise<{
+  sessions: { id: string; modifiedAt: string; bytes: number }[]; truncated: boolean;
+}> {
+  let directory: string;
+  try { directory = await sessionDirectory(project, false); }
+  catch (error) { if (isMissing(error)) return { sessions: [], truncated: false }; throw error; }
+  const names = (await readdir(directory)).filter((name) => name.endsWith(".json") &&
+    z.string().uuid().safeParse(name.slice(0, -5)).success).sort();
+  const sessions = await Promise.all(names.slice(0, 200).map(async (name) => {
+    const info = await lstat(await resolvePath(project.workspace.root, `.jev/sessions/${name}`));
+    if (!info.isFile() || info.nlink !== 1 || (process.platform !== "win32" &&
+      ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))) {
+      throw new Error(`Session ${name}: expected a private, owned, unlinked regular file`);
+    }
+    return { id: name.slice(0, -5), modifiedAt: info.mtime.toISOString(), bytes: info.size };
+  }));
+  sessions.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  return { sessions, truncated: names.length > 200 };
 }
 
 export async function saveSession(project: Project, messages: Message[], model: CodingModel): Promise<string> {

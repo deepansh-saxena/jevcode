@@ -1,8 +1,11 @@
 import { z } from "zod";
 
 export const idSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
-export const toolNames = [
+export const executionToolNames = [
   "list_files", "read_file", "search_files", "write_file", "replace_text", "run_command",
+] as const;
+export const toolNames = [
+  ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 
@@ -55,9 +58,10 @@ export const configSchema = z.object({
     maxDurationMs: z.number().int().min(100).max(3_600_000).default(300_000),
     maxContextChars: z.number().int().min(1000).max(1_000_000).default(120_000),
     maxSkillChars: z.number().int().min(100).max(100_000).default(24_000),
+    maxSpecialistRuns: z.number().int().min(0).max(10).default(3),
   }).strict().default({
     maxTurns: 16, maxToolCalls: 40, maxTokens: 100_000,
-    maxDurationMs: 300_000, maxContextChars: 120_000, maxSkillChars: 24_000,
+    maxDurationMs: 300_000, maxContextChars: 120_000, maxSkillChars: 24_000, maxSpecialistRuns: 3,
   }),
   protectedPaths: z.array(z.string().min(1).refine((value) =>
     !value.includes("\\") && !value.includes("\0") &&
@@ -92,7 +96,7 @@ export const specialistSchema = z.object({
   role: z.string().min(1).max(4000),
   model: z.string().min(1).optional(),
   skills: z.array(idSchema).default([]),
-  tools: z.array(z.enum(toolNames)).min(1),
+  tools: z.array(z.enum(executionToolNames)).min(1),
   maxTurns: z.number().int().min(1).max(20).default(5),
   maxToolCalls: z.number().int().min(1).max(40).default(10),
   resultFormat: z.enum(["text", "structured"]).optional(),

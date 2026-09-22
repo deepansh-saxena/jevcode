@@ -14,6 +14,10 @@ export interface Message {
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }
+export function isUserTask(message: Message): boolean {
+  return message.role === "user" && !message.content?.startsWith("Specialist report (") &&
+    !message.content?.startsWith("Earlier conversation summary (");
+}
 export interface ToolSpec {
   type: "function";
   function: { name: string; description: string; parameters: Record<string, unknown> };

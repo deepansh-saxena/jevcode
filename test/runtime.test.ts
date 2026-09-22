@@ -48,7 +48,7 @@ test("multi-file investigations continue within the original context limit and l
       assert.equal(results.length, 3);
       assert.ok(results.some((result) => result.contextPruned === true));
       assert.ok(results.every((result) => result.sha256 === digest(content)));
-      assert.equal(results.at(-1).contextPruned, undefined);
+      assert.match(results.at(-1).content, /CONTEXT_PRIVATE_CONTENT/);
     }
   });
   const result = await run(project, options(model, { emit: (event, data) => events.push({ event, data: data ?? {} }) }));

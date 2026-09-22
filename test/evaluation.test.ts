@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { benchmark, evaluateGuardrails } from "../src/evaluation.js";
 import { fixture, server, requestBody, call, final } from "./helpers.js";
+import type { ToolSpec } from "../src/llm.js";
 
 test("benchmark uses fresh fixtures, seeded paired trials, independent routing, and unknown costs", async (t) => {
   const project = await fixture(t);
@@ -19,7 +20,8 @@ test("benchmark uses fresh fixtures, seeded paired trials, independent routing, 
     tasks: [{ id: "read", task: "Read marker.txt and say cobalt", files: { "marker.txt": "cobalt" },
       answerIncludes: ["cobalt"], minToolCalls: 1 }] };
   const model = {
-    async complete(messages: { role: string; content: string | null }[]) {
+    async complete(messages: { role: string; content: string | null }[], tools: ToolSpec[]) {
+      assert.ok(!tools.some((tool) => ["list_capabilities", "load_skill", "delegate_task", "create_skill", "create_specialist"].includes(tool.function.name)));
       if (messages.at(-1)?.role === "user") return call("read_file", { path: "marker.txt" });
       assert.match(messages.at(-1)!.content!, /cobalt/);
       return final("cobalt");

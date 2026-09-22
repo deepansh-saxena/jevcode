@@ -10,6 +10,7 @@ import { fixture, options, server, requestBody } from "./helpers.js";
 import type { Message } from "../src/llm.js";
 import { digest } from "../src/workspace.js";
 import { saveSession, restoreSession } from "../src/session.js";
+import { compactConversation } from "../src/context.js";
 
 function native(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
   return {
@@ -96,6 +97,33 @@ test("subscription snapshots preserve native signatures across a fresh adapter w
   const { readFile } = await import("node:fs/promises");
   const snapshot = await readFile(path.join(project.workspace.root, `.jev/sessions/${id}.json`), "utf8");
   assert.doesNotMatch(snapshot, /fake-provider-access|fake-refresh/);
+});
+
+test("semantic compaction preserves native history for summarization and drops it for subsequent turns", async (t) => {
+  const project = await fixture(t);
+  project.config.llm.model = "gpt-5.5";
+  const manager = await auth(project.workspace.root);
+  let requests = 0;
+  const adapter = new SubscriptionModel(project.config.llm, "openai-codex", manager, async (_model, context) => {
+    const index = requests++;
+    if (index === 0) return native({ content: [
+      { type: "thinking", thinking: "Observations", thinkingSignature: "native-context-signature" },
+      { type: "text", text: "Long factual observation. ".repeat(1000) },
+    ] });
+    if (index === 1) {
+      assert.match(JSON.stringify(context), /native-context-signature/);
+      return native({ content: [{ type: "text", text: "Fix the bug. No edits or checks have been performed." }] });
+    }
+    assert.doesNotMatch(JSON.stringify(context), /native-context-signature/);
+    assert.match(JSON.stringify(context), /Fix the bug/);
+    return native();
+  });
+  const messages: Message[] = [{ role: "system", content: "Trusted instructions" }, { role: "user", content: "Fix the bug" }];
+  messages.push((await adapter.complete(messages, [], "gpt-5.5", new AbortController().signal)).message);
+  const compacted = await compactConversation(project, adapter, messages, "", new AbortController().signal, () => {});
+  compacted.messages.push({ role: "user", content: "Continue" });
+  await adapter.complete(compacted.messages, [], "gpt-5.5", new AbortController().signal);
+  assert.equal(requests, 3);
 });
 
 test("default subscription streaming transport emits text but not reasoning or arguments", async (t) => {

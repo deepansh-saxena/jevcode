@@ -16,7 +16,7 @@ const help = `Jev Code - local coding harness
 
 Usage:
   jevcode [--cwd DIR] [--provider copilot|openai|api] [--model ID]
-          [--write] [--commands] [--resume UUID]
+          [--write] [--commands] [--plan] [--skill ID ...] [--specialist ID] [--resume UUID]
   jevcode chat [same options]
   jevcode init [--cwd DIR]
   jevcode inspect [--cwd DIR]
@@ -29,11 +29,14 @@ Usage:
   jevcode evaluate-guardrails <suite.json> [--cwd DIR]
   jevcode run [--cwd DIR] [--skill ID ...] [--specialist ID]
                [--provider copilot|openai|api] [--model ID]
-               [--write] [--commands] [--json] "task"
+               [--write] [--commands] [--plan] [--json] "task"
 
 Run is read-only by default. --write and --commands expose those tools,
 but EACH mutating action still requires interactive approval.
 Commands execute project code with your OS permissions, NOT in a sandbox.
+--plan forces read-only investigation and planning even when edit flags are present.
+In chat, /help lists commands; /permissions enables tools and /skills or /agents
+can ask the coding model to create reusable capabilities after approval.
 
 Configuration: .jev/config.json
 Account credentials: ~/.jev-code/auth/ (private files, separate from this project).
@@ -49,6 +52,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       cwd: { type: "string" }, skill: { type: "string", multiple: true },
       specialist: { type: "string" }, write: { type: "boolean" },
       commands: { type: "boolean" }, json: { type: "boolean" },
+      plan: { type: "boolean" },
       provider: { type: "string" }, model: { type: "string" },
       resume: { type: "string" },
       help: { type: "boolean", short: "h" },
@@ -132,7 +136,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     await chat(project, {
       skills: values.skill ?? [], ...(values.specialist ? { specialistId: values.specialist } : {}),
       permissions: { write: values.write ?? false, commands: values.commands ?? false },
-    }, values.resume);
+    }, values.resume, values.plan ?? false);
     return;
   }
   if (values.resume) throw new Error("--resume is only supported by interactive chat");
@@ -151,6 +155,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       task, skills: values.skill ?? [],
       ...(values.specialist ? { specialistId: values.specialist } : {}),
       permissions: { write: values.write ?? false, commands: values.commands ?? false },
+      planMode: values.plan ?? false,
       signal: controller.signal, emit: log.emit,
       async approve(action, signal) {
         if (!process.stdin.isTTY || !process.stderr.isTTY) {

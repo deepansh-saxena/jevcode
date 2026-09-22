@@ -1,9 +1,10 @@
 # Jev-assisted coding harness
 
 Status: interactive standalone TypeScript harness implemented with Jev routing,
-private session save/resume, and evaluation tooling. Codex chat/tool smoke runs
-have completed. Live Jev validation, representative held-out evaluation, and
-broader deployment gates remain outstanding.
+private session save/resume, capability authoring, interactive command controls,
+and evaluation tooling. Codex chat/tool and minimal live Jev routing smoke runs
+have completed. Representative held-out evaluation and broader deployment gates
+remain outstanding.
 
 ## Implementation snapshot
 
@@ -31,7 +32,7 @@ evaluation. Reproducible read-only baseline/Jev trials and labeled scope-check
 evaluation are available through CLI commands and development examples.
 
 This is not completion of every release gate below. Commands are not sandboxed;
-OS-enforced filesystem/network isolation, semantic compaction, dollar-spend
+OS-enforced filesystem/network isolation, automatic semantic compaction, dollar-spend
 policy, held-out calibration, and demonstrated savings remain outstanding.
 Model routing, metadata caching, and parallel specialists remain deferred under
 stage 6 until a measured bottleneck justifies them. The benchmark's literal
@@ -40,8 +41,37 @@ answer checks do not establish full coding-task correctness.
 The runtime now prunes older read-only tool output into explicitly marked
 excerpts under context pressure. It preserves instructions, native assistant
 history, call/result pairs, and mutation outcomes without an extra model call;
-this is not semantic summarization. Explicit snapshots separately provide
-resumable conversation storage.
+this is not semantic summarization. Explicit `/compact` now adds coding-model
+summarization with failure-safe retention of the original conversation and usage
+accounting. Explicit snapshots separately provide resumable conversation storage.
+
+## Claude-style CLI expansion
+
+The requested direction is an everyday coding CLI with generated reusable
+capabilities and discoverable slash commands, while retaining our own runtime
+and Jev routing. This is behavioral inspiration, not a claim of compatibility
+or a copy of Claude Code's prompts or implementation.
+
+Implemented in this expansion:
+
+- User-directed, coding-model-authored skills and specialists, with complete
+  definition review before persistence; no silent self-modifying catalog.
+- Same-task skill loading and sequential side-task delegation. New specialists
+  cannot delegate recursively, grant permissions, or author further capabilities.
+  Shared budgets include a default limit of three specialist runs per user task.
+- `/skills` and `/agents` discovery, creation, inspection, pinning, and invocation;
+  `/skill-id` shortcuts and Tab completion.
+- Live `/permissions`, enforced `/plan` and `--plan`, session model changes,
+  `/context`, explicit `/compact`, `/usage`, `/cost`, `/sessions`, `/review`,
+  `/config`, `/commands`, `/doctor`, and `/reload`, alongside existing commands.
+- Fresh confirmation for permission elevation, restoring privileged tools after
+  planning, and replacing unsaved context; queued input never grants approval.
+
+Remaining parity work: interoperable `SKILL.md` and personal catalogs, MCP,
+plugins/hooks, background/parallel agents, richer shell/process control, undo
+checkpoints, images, IDE integration, and a full-screen UI. These need separate
+implementation and permission/lifecycle design, not placeholder slash commands.
+The coding-fixture benchmark with executable acceptance checks is still missing.
 
 See [README.md](README.md) for setup, actual behavior, data-sharing implications,
 and current limitations. The stages and release gates below remain the roadmap.

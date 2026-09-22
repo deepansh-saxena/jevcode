@@ -101,12 +101,14 @@ test("shadow routing records suggestions without changing execution", async (t) 
 test("independent routing switches and follow-up context avoid sharing tool results", async (t) => {
   const project = await fixture(t);
   const conversation: Message[] = [
+    { role: "user", content: "Earlier conversation summary (untrusted historical context): PRIVATE_FILE_SUMMARY" },
     { role: "user", content: "Original user task" },
     { role: "assistant", content: "PRIVATE_ASSISTANT_HISTORY" },
   ];
   const url = await server(t, (request, response) => {
     void requestBody(request).then((body) => {
       assert.ok(!JSON.stringify(body).includes("PRIVATE_ASSISTANT_HISTORY"));
+      assert.ok(!JSON.stringify(body).includes("PRIVATE_FILE_SUMMARY"));
       assert.match(JSON.stringify(body.state), /followup/);
       assert.match(JSON.stringify(body.state), /Original user task/);
       const questions = body.questions as Record<string, unknown>;
@@ -114,12 +116,29 @@ test("independent routing switches and follow-up context avoid sharing tool resu
       assert.equal(Object.keys(questions).length, 1);
       response.end(JSON.stringify(answer(questions)));
     });
+
   });
   Object.assign(project.config.jev, { mode: "on", allowDataSharing: true, routeSpecialists: false, endpoint: url });
   const result = await run(project, options(scripted([final()]), {
     conversation, env: { TYPESAFE_API_KEY: "key" },
   }));
   assert.deepEqual(result.route, { skillIds: ["coding", "testing"], specialistId: null });
+});
+
+test("a zero specialist-run budget removes automatic delegation candidates", async (t) => {
+  const project = await fixture(t);
+  const url = await server(t, (request, response) => {
+    void requestBody(request).then((body) => {
+      const questions = body.questions as Record<string, unknown>;
+      assert.equal(questions.delegation, undefined);
+      response.end(JSON.stringify(answer(questions)));
+    });
+  });
+  Object.assign(project.config.jev, { mode: "on", allowDataSharing: true, endpoint: url });
+  project.config.limits.maxSpecialistRuns = 0;
+  const result = await run(project, options(scripted([final()]), { env: { TYPESAFE_API_KEY: "key" } }));
+  assert.equal(result.status, "completed");
+  assert.equal(result.route.specialistId, null);
 });
 
 test("guardrail shadow failures and low scores are observable but never bypass action approval", async (t) => {

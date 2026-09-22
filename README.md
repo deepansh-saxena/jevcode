@@ -89,11 +89,55 @@ immediately. This is a line-oriented terminal UI, not a full-screen editor.
 | Chat command | Behavior |
 | --- | --- |
 | `/help`, `/status` | Show commands or current settings |
-| `/clear` | Start fresh context without changing workspace files |
+| `/clear`, `/new` | Start fresh context without changing files or permissions |
+| `/skills`, `/agents` | List installed skills or specialists |
+| `/skills show ID`, `/agents show ID` | Inspect a definition; skill display includes its instructions |
+| `/skills create DESCRIPTION`, `/agents create DESCRIPTION` | Ask the coding model to author a new persistent capability; requires edit permission and review |
+| `/SKILL_ID [task]`, `/skills run ID [task]` | Load a skill for one task; use the longer form if its name conflicts with a built-in command |
+| `/agents run ID TASK` | Explicitly run a specialist before the main agent for one task |
+| `/skills use ID...`, `/skills use none` | Set or clear pinned optional skills for subsequent tasks; mandatory skills always apply |
+| `/agents use ID`, `/agents use off` | Set or clear the pinned specialist; clearing a pin does not disable automatic selection |
+| `/permissions [read-only\|edit\|commands\|all]` | Inspect or replace enabled tool permissions in this chat; enabling tools requires fresh confirmation |
+| `/plan [on\|off]` | Toggle or set read-only planning; leaving it requires confirmation when restoring enabled edit/command tools |
+| `/model [ID]`, `/models` | Show/change the session model or list the bundled account catalog; changing model clears context after confirmation |
+| `/context` | Estimate current context characters, including native history; not a token count |
+| `/compact [focus]` | Ask the coding model to summarize old context, keeping the latest user task; consumes tokens |
+| `/usage`, `/cost` | Show cumulative model/Jev usage and timing since startup; dollar costs remain unknown |
+| `/config`, `/commands` | Inspect current session configuration or configured executable commands |
+| `/doctor` | Check local registries and credential availability; no live model request |
+| `/reload` | Reload skills, specialists, and root `AGENTS.md`, retaining session settings |
+| `/review [scope]` | Run a read-only review without edit or command tools |
 | `/jev off`, `/jev shadow`, `/jev on` | Change routing for this chat only; prior sharing consent is required |
 | `/save` | Ask before writing a private snapshot; prints its resume UUID |
-| `/resume UUID` | Load a saved snapshot for this workspace/provider/model |
+| `/sessions`, `/resume` | List saved snapshot UUIDs without displaying transcripts |
+| `/resume UUID` | Load a saved snapshot; confirm before replacing current unsaved context |
 | `/exit`, `/quit` | Leave the chat |
+
+Press Tab to complete built-in commands, installed skill commands, and IDs after
+`/skills show|use|run` or `/agents show|use|run`. Command history stays in memory.
+`--plan` starts chat or a one-shot run in planning mode, overriding `--write` and
+`--commands`. Plan mode is enforced by withholding mutating tools, not just a prompt.
+Queued `yes` messages cannot enable permissions or approve actions.
+
+For example, no restart or manual manifest authoring is necessary:
+
+```text
+/permissions edit
+/skills create A regression-testing workflow for this project's framework
+/agents create A read-only specialist that investigates test failures
+/skills
+/agents
+/testing Identify missing boundary tests
+/permissions all
+Fix the reported bug and run the configured tests.
+```
+
+Answer the permission and exact-definition approval prompts as they appear.
+The model authors definitions from your description and inspected project context;
+Jev routes among installed candidates. It does not write the definitions.
+Creation is user-directed, not silent automatic accumulation after every task.
+This follows the public Claude Code skill/subagent workflow in spirit, not its
+file format or complete feature set.
 
 `jevcode --resume UUID` resumes at startup. Saving is opt-in: snapshots contain
 raw conversations, accessed file contents, and native model history, but no
@@ -105,6 +149,23 @@ approvals: current instructions, configuration, permissions, and file hashes
 remain authoritative. Missing results from cancelled/blocked batches are marked
 as unknown rather than rerun. Shared turn/token/time limits reset per user task;
 the bounded conversation survives until `/clear` or exit.
+`/compact` is explicit, not automatic semantic compaction. It retains current
+system instructions and the latest user task, replacing older exchanges with a
+marked historical summary. Summaries can omit details; prior approvals and file
+hashes must not be reused. A failed, truncated, or oversized summary leaves the
+original conversation intact. `/save` is still required for persistence.
+Usage totals include main agents, specialists, Jev, failures, and compaction;
+they reset on process restart and are not restored from snapshots.
+
+### CLI parity scope
+
+This is an independent harness, **not full Claude Code parity**. Missing surfaces
+include MCP servers, plugins/hooks, Agent Skills `SKILL.md` import, personal/global
+capability catalogs, background/parallel agents, arbitrary shell sessions, file
+undo/checkpoints, image input, IDE integration, and a full-screen TUI. Commands
+listed above are implemented; unsupported commands fail explicitly rather than
+acting as placeholders. OS-level sandboxing, automated coding-task evaluation,
+and demonstrated Jev savings also remain outstanding.
 
 ## Account login and provider selection
 
@@ -233,7 +294,8 @@ A skill manifest points to an instruction file under `.jev/skills/`:
 ```
 
 Mandatory skills are always loaded. Optional skills can be chosen by `--skill`
-(repeatable) or by Jev. Only selected instruction bodies enter the coding-model
+(repeatable), skill slash commands, Jev, or the main model's `load_skill` tool.
+Only selected instruction bodies enter the coding-model
 context. Jev routing receives descriptions, not the skill bodies. Skills are
 deduplicated and subject to a combined character budget; overflowing it is an
 explicit error rather than silently dropping mandatory instructions.
@@ -244,6 +306,17 @@ only with the selected skill and count against the same instruction budget.
 `commandIds` references existing configured commands as skill scripts; it does
 not execute them, enable command tools, or bypass per-action approval. Arbitrary
 script paths and remote skill installation are not supported.
+
+`create_skill` creates an optional skill with a JSON manifest and a unique
+instruction Markdown file under `.jev/skills/`. Existing IDs are never overwritten.
+`create_specialist` similarly writes a JSON manifest under `.jev/specialists/`.
+Both show the complete proposed definition for approval, revalidate references
+and destinations afterward, and publish only new private files. These are narrow
+registry-authoring tools, not general access to protected `.jev/` state.
+New definitions are usable in the same task and loaded in subsequent sessions.
+Manual edits are picked up with `/reload` or restart. Automatic updating/deleting
+of existing definitions and mandatory-skill creation are not exposed to the model.
+The existing JSON manifest format remains canonical; `.claude/` files are not imported.
 
 ### Specialists
 
@@ -266,7 +339,13 @@ An optional `model` field overrides the coding-model name for that specialist,
 using the same configured provider. Specialist tools are intersected with the
 session's enabled tools. A manifest cannot grant write or command permissions.
 
-At most one specialist runs per user task, followed by the main agent. The specialist
+Jev can select an initial specialist before the main agent. The main agent can
+also call `delegate_task` for a bounded side task while working, including a newly
+created specialist. Runs are sequential, with at most `limits.maxSpecialistRuns`
+(default 3) per user task, including the initial routed specialist. Zero disables
+automatic and dynamic delegation; explicitly requesting a specialist with a zero
+budget returns a limit outcome.
+The specialist
 gets the task, selected skills, and up to three previous user task texts on
 follow-ups, not the main agent's tool results or assistant history.
 Its report is passed to the main agent as untrusted observations. Newly generated
@@ -277,7 +356,10 @@ Malformed reports produce an explicit limited handoff for direct investigation.
 Older manifests without this field retain freeform text behavior. There is no
 recursive delegation or concurrent workspace editing.
 Specialist-local limits return an explicitly partial report; global limits stop
-the entire run.
+the entire run. Specialists cannot author capabilities or call `load_skill` or
+`delegate_task`; their skills and tools come from their validated manifest.
+Jev still routes at task intake, not before each tool choice. With Jev off, the
+main coding model can still load installed skills and delegate via tools.
 
 ## Jev routing and guardrails
 
@@ -369,7 +451,8 @@ statistic, not a probability that the decision is correct.
 The coding provider receives the task, loaded instructions, model conversation,
 and accessed tool results. Jev routing receives the task, candidate descriptions,
 selected capability IDs, configured limits, permissions, and up to three previous
-user task texts in chat. A semantic check receives the
+user task texts in chat. Compaction summaries and specialist reports are not
+forwarded as previous user task texts. A semantic check receives the
 task and full proposed action, which can include new file contents or replacement
 text. Enable it only when those inputs are authorized for the external service.
 
@@ -388,6 +471,10 @@ action. Use only workspaces and content permitted for the configured providers.
 | `write_file` | Approved new-file creation or whole-file replacement with expected hash |
 | `replace_text` | Approved replacement of exactly one occurrence with expected hash |
 | `run_command` | Approved execution of a fixed command ID from configuration |
+| `list_capabilities` | Discover installed skill and specialist metadata |
+| `load_skill` | Load a skill into the main task's bounded instructions |
+| `delegate_task` | Run a sequential, isolated specialist within shared limits and permissions |
+| `create_skill`, `create_specialist` | Main-agent-only creation of new, reviewed project capabilities; edit permission required |
 
 File tools reject absolute paths, parent traversal, symlinks, and hard-linked
 files. Built-in protected paths include `.jev`, `.jev-code`, `.git`, `.env*`, common credential
@@ -461,7 +548,8 @@ persist task bodies, file contents, tool arguments/results, or final answers.
 Error messages can include file paths. Logs have no automatic retention policy;
 delete specific old log files according to your requirements.
 
-Semantic context summarization and runtime model routing are not implemented.
+Automatic semantic compaction and runtime model-tier routing are not implemented;
+explicit `/compact` and session `/model` selection are available.
 Read-only output pruning is explicit and bounded; irreducible context still stops
 at the configured limit rather than silently dropping instructions or mutation
 outcomes. The terminal remains line-oriented, not a full-screen coding IDE.
@@ -483,6 +571,8 @@ tasks with embedded fixture files. Each trial runs in a fresh temporary workspac
 with the same config, registries, instructions, and read-only tools. The seeded
 order mixes baseline and Jev trials. Required guardrails are kept identical.
 No commands or writes are approved; this runner evaluates read-only tasks.
+Model-driven capability creation/loading and mid-task delegation tools are
+disabled in these trials to isolate intake routing from dynamic model choices.
 Fixture directories are removed afterward; source workspace files are untouched.
 
 Acceptance uses case-sensitive `answerIncludes`, `answerExcludes`, and

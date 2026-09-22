@@ -108,6 +108,7 @@ export async function benchmark(project: Project, input: unknown, signal: AbortS
       let fallbacks = 0;
       const result = await run(instance, {
         task: trial.task.task, permissions: { write: false, commands: false }, signal, approve: async () => false,
+        dynamicCapabilities: false,
         ...(model ? { model } : {}), env: { ...(env ?? process.env), [project.config.jev.apiKeyEnv]: key },
         emit(event, data) {
           if (event === "jev_response" || event === "jev_error") jevMs += Number(data?.durationMs ?? 0);

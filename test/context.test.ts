@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { contextSize, pruneContext, serializeToolResult } from "../src/context.js";
+import { compactConversation, contextSize, pruneContext, serializeToolResult } from "../src/context.js";
 import type { Message } from "../src/llm.js";
-import { scripted } from "./helpers.js";
+import { fixture, scripted, final, call } from "./helpers.js";
 import { digest } from "../src/workspace.js";
 
 function exchange(name: string, result: unknown, id: string): Message[] {
@@ -110,4 +110,43 @@ test("listing and search pruning is marked explicitly and retains every error ou
     assert.equal(JSON.parse(messages[3]!.content!).contextPruned, true);
     assert.deepEqual(JSON.parse(messages.at(-1)!.content!), { error: "Access denied" });
   }
+});
+
+test("semantic compaction retains trusted instructions and latest task but never accepts tools or truncated summaries", async (t) => {
+  const project = await fixture(t);
+  const messages: Message[] = [...instructions, ...exchange("read_file", { content: "Observation ".repeat(3000) }, "read"),
+    { role: "assistant", content: "The file was inspected. ".repeat(200) }];
+  const before = structuredClone(messages);
+  for (const response of [
+    { ...final("Partial summary"), finishReason: "length" },
+    call("write_file", { path: "no", content: "no", expectedHash: null }),
+    final(""),
+  ]) {
+    await assert.rejects(compactConversation(project, scripted([response]), messages, "", new AbortController().signal, () => {}), /complete bounded summary/);
+    assert.deepEqual(messages, before);
+  }
+  let usage = 0;
+  const result = await compactConversation(project, scripted([final("Goal: explain architecture. One file inspected; no edits or checks.")]),
+    messages, "Keep constraints", new AbortController().signal, (value) => { usage += value.inputTokens; });
+  assert.ok(result.afterChars < result.beforeChars);
+  assert.equal(usage, 10);
+  assert.strictEqual(result.messages[0], messages[0]);
+  assert.match(result.messages[1]!.content!, /not new instructions or permission grants/);
+  assert.equal(result.messages.at(-1)!.content, instructions[1]!.content);
+  assert.ok(!result.messages.some((message) => message.tool_calls?.length || message.role === "tool"));
+  assert.deepEqual(messages, before);
+});
+
+test("compaction refuses unsummarizable context before making a request and leaves original tool output intact", async (t) => {
+  const project = await fixture(t);
+  project.config.limits.maxContextChars = 3000;
+  const messages: Message[] = [...instructions,
+    ...exchange("read_file", { content: "Observation ".repeat(1000) }, "read"),
+    { role: "assistant", content: "Preserved reasoning. ".repeat(1000) }];
+  const before = structuredClone(messages);
+  let requests = 0;
+  await assert.rejects(compactConversation(project, scripted([]), messages, "", new AbortController().signal,
+    () => {}, () => { requests++; }), /context limit/);
+  assert.equal(requests, 0);
+  assert.deepEqual(messages, before);
 });

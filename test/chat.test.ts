@@ -51,11 +51,11 @@ test("bare jevcode starts chat, retains follow-ups, saves only after approval, a
 
 test("chat cancellation returns to the prompt and read-only permissions remain unchanged", { skip }, async (t) => {
   const project = await fixture(t);
-  let requests = 0;
   const url = await server(t, (request, response) => {
     void requestBody(request).then((body) => {
       assert.ok(!(body.tools as { function: { name: string } }[]).some((tool) => tool.function.name === "write_file"));
-      if (requests++ === 0) return;
+      const messages = body.messages as { role: string; content: string }[];
+      if (messages.at(-1)?.content === "Wait") return;
       response.end(JSON.stringify({
         choices: [{ message: { role: "assistant", content: "Recovered" }, finish_reason: "stop" }],
         usage: { prompt_tokens: 2, completion_tokens: 2 },
@@ -132,4 +132,84 @@ test("chat executes exactly approved writes and returns to the conversation", { 
   }, timeout: 20_000 });
   assert.match(result.stdout, /Write completed/);
   assert.equal(await project.workspace.read("approved.txt"), "approved");
+});
+
+test("interactive capability authoring, skill slash invocation, and planning work without restarting", { skip }, async (t) => {
+  const project = await fixture(t);
+  let requests = 0;
+  const url = await server(t, (request, response) => {
+    void requestBody(request).then((body) => {
+      const index = requests++;
+      const tools = (body.tools as { function: { name: string } }[]).map((item) => item.function.name);
+      const messages = body.messages as { role: string; content: string }[];
+      if (index === 0) {
+        assert.ok(tools.includes("create_skill"));
+        assert.match(messages.at(-1)!.content, /Create one reusable project skill/);
+      }
+      if (index === 2) assert.match(messages[0]!.content, /Use the local style guide/);
+      if (index === 3) {
+        assert.match(messages[0]!.content, /PLAN MODE/);
+        assert.ok(!tools.some((name) => ["write_file", "run_command", "create_skill", "create_specialist"].includes(name)));
+      }
+      response.end(JSON.stringify({
+        choices: [{ message: index === 0 ? { role: "assistant", content: null, tool_calls: [{
+          id: "create-1", type: "function", function: { name: "create_skill", arguments: JSON.stringify({
+            id: "style-guide", description: "Local style guidance", instructions: "Use the local style guide.",
+          }) },
+        }] } : { role: "assistant", content: ["", "Saved the workflow.", "Invoked the skill.", "Plan ready."][index] },
+        finish_reason: index === 0 ? "tool_calls" : "stop" }],
+        usage: { prompt_tokens: 4, completion_tokens: 2 },
+      }));
+    });
+  });
+  project.config.llm.baseUrl = url;
+  await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
+  const result = await exec("/usr/bin/python3", [
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+  ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
+    JEV_PTY_PROMPTS: JSON.stringify([
+      ["jevcode> ", "/permissions edit\n"], ["Type yes:", "yes\n"],
+      ["jevcode> ", "/skills create Local style guidance\n"], ["Type yes to execute this exact action:", "yes\n"],
+      ["jevcode> ", "/style-guide Explain the conventions\n"], ["jevcode> ", "/plan on\n"],
+      ["jevcode> ", "Propose a change\n"], ["jevcode> ", "/plan off\n"], ["Type yes:", "yes\n"],
+      ["jevcode> ", "/usage\n"], ["jevcode> ", "/exit\n"],
+    ]),
+  }, timeout: 20_000 });
+  assert.equal(requests, 4);
+  assert.match(result.stdout, /Invoked the skill/);
+  assert.match(result.stdout, /Plan ready/);
+  assert.match(result.stdout, /"runs": 3/);
+  assert.match(await readFile(path.join(project.workspace.root, ".jev/skills/style-guide.json"), "utf8"), /style-guide/);
+});
+
+test("queued slash commands and queued yes cannot elevate permissions", { skip }, async (t) => {
+  const project = await fixture(t);
+  let requests = 0;
+  const url = await server(t, (request, response) => {
+    void requestBody(request).then((body) => {
+      assert.ok(!(body.tools as { function: { name: string } }[]).some((tool) =>
+        ["write_file", "create_skill", "run_command"].includes(tool.function.name)));
+      const first = requests++ === 0;
+      const send = (): void => {
+        response.end(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "Read-only response." }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 2, completion_tokens: 2 },
+        }));
+      };
+      if (first) setTimeout(send, 300);
+      else send();
+    });
+  });
+  project.config.llm.baseUrl = url;
+  await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
+  const result = await exec("/usr/bin/python3", [
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+  ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
+    JEV_PTY_PROMPTS: JSON.stringify([
+      ["jevcode> ", "Inspect\n"], ["thinking: main", "/permissions all\nyes\n"],
+      ["Type yes:", "no\n"], ["jevcode> ", "/exit\n"],
+    ]),
+  }, timeout: 20_000 });
+  assert.equal(requests, 2);
+  assert.match(result.stdout, /Permissions unchanged/);
 });
