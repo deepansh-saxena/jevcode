@@ -34,7 +34,8 @@ test("login requires a terminal rather than collecting tokens from pipes", async
 test("CLI catalog discovery works without login and provider/model overrides retain API-key mode", async (t) => {
   const project = await fixture(t);
   const catalog = await exec(process.execPath, ["--import", "tsx", cli, "models", "openai"]);
-  assert.match(catalog.stdout, /gpt-5.4-mini/);
+  assert.match(catalog.stdout, /gpt-5.5/);
+  assert.match(catalog.stderr, /not a live account model list/);
   const url = await server(t, (request, response) => {
     void requestBody(request).then((body) => {
       assert.equal(body.model, "override-model");

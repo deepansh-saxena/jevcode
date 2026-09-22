@@ -10,7 +10,7 @@ import type { CodingModel, Completion, Message, ToolSpec } from "./llm.js";
 
 export const defaultAccountModels: Record<AccountProvider, string> = {
   "github-copilot": "gpt-4.1",
-  "openai-codex": "gpt-5.4-mini",
+  "openai-codex": "gpt-5.5",
 };
 
 export function accountModels(provider: AccountProvider): Model<Api>[] {
@@ -21,6 +21,36 @@ export function accountModel(provider: AccountProvider, id: string): Model<Api> 
   const model = accountModels(provider).find((candidate) => candidate.id === id);
   if (!model) throw new Error(`Unknown model ${id} for ${provider}. Run: jevcode models ${provider}`);
   return model;
+}
+
+function requestFailure(provider: AccountProvider, model: string, error: unknown, httpStatus?: number): Error {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const reportedStatus = message.match(/^(?:HTTP\s+)?(400|401|403|404|408|422|429|5\d\d)\b/)?.[1];
+  const status = httpStatus ?? (reportedStatus ? Number(reportedStatus) : undefined);
+  const prefix = `${provider} request failed${status ? ` (HTTP ${status})` : ""}`;
+  if (status === 401 || /unauthorized|invalid token|token[\s\S]*expired|authentication/i.test(message)) {
+    const alias = provider === "openai-codex" ? "openai" : "copilot";
+    return new Error(`${prefix}: the provider rejected your sign-in. Run: jevcode login ${alias}`);
+  }
+  if (status === 429 || /usage[_ ]limit|quota|rate[_ -]limit/i.test(message)) {
+    return new Error(`${prefix}: the provider reported a usage or rate limit. Check your account allowance or retry after the limit resets.`);
+  }
+  if (/model[\s\S]*(?:not supported|not found|not available|does not exist|not have access|unavailable)|unsupported[_ -]model|model[_ -]not[_ -]found/i.test(message)) {
+    return new Error(`${prefix}: model "${model}" is unavailable for this account. Choose an account-supported model with --model; the bundled model catalog does not guarantee access.`);
+  }
+  if (status === 403) {
+    return new Error(`${prefix}: account or organization policy denied access. Check your subscription and model permissions.`);
+  }
+  if (status === 400 || status === 422 || /unsupported parameter|invalid[\s\S]*(?:parameter|schema)/i.test(message)) {
+    return new Error(`${prefix}: the provider rejected the request format. Check model and adapter compatibility; signing in again may not help.`);
+  }
+  if (status && status >= 500) {
+    return new Error(`${prefix}: the provider reported a server error. Retry later.`);
+  }
+  if (/fetch failed|network|connection|certificate|\btls\b|\bdns\b/i.test(message)) {
+    return new Error(`${prefix}: could not connect to the provider. Check your network, proxy, and TLS settings.`);
+  }
+  return new Error(`${prefix}: unexpected provider response. Sensitive response details were withheld.`);
 }
 
 export type SubscriptionTransport = (
@@ -91,20 +121,25 @@ export class SubscriptionModel implements CodingModel {
     const model = oauth.modifyModels?.([base], credentials)[0] ?? base;
     const context = this.context(messages, tools);
     let response: AssistantMessage;
+    let httpStatus: number | undefined;
     try {
       response = await this.transport(model, context, {
         apiKey: oauth.getApiKey(credentials), signal: deadline, transport: "sse",
         maxTokens: Math.min(this.config.maxOutputTokens, model.maxTokens),
         timeoutMs: this.config.timeoutMs, maxRetries: 0,
+        onResponse: (metadata) => {
+          if (Number.isInteger(metadata.status) && metadata.status >= 100 && metadata.status <= 599) {
+            httpStatus = metadata.status;
+          }
+        },
       });
-    } catch {
+    } catch (error) {
       deadline.throwIfAborted();
-      throw new Error(`${this.provider} request failed; check account access and connectivity. Provider response details were withheld.`);
+      throw requestFailure(this.provider, modelId, error, httpStatus);
     }
     deadline.throwIfAborted();
     if (response.stopReason === "error" || response.stopReason === "aborted") {
-      const status = response.errorMessage?.match(/\b(?:401|403|429|5\d\d)\b/)?.[0];
-      throw new Error(`${this.provider} request failed${status ? ` (HTTP ${status})` : ""}. Check subscription limits, model access, or log in again.`);
+      throw requestFailure(this.provider, modelId, response.errorMessage, httpStatus);
     }
     const input = response.usage.input + response.usage.cacheRead + response.usage.cacheWrite;
     const output = response.usage.output;

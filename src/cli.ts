@@ -67,7 +67,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     } else {
       const { accountModels } = await import("./subscription-model.js");
       process.stdout.write(`${accountModels(provider).map((model) => model.id).join("\n")}\n`);
-      process.stderr.write("Catalog models are not a guarantee of access; subscription and organization policies apply.\n");
+      process.stderr.write("Bundled adapter catalog, not a live account model list; subscription and organization policies apply.\n");
     }
     return;
   }

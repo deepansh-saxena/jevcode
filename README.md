@@ -71,19 +71,21 @@ to run the local automated tests.
 | CLI name | Config provider | Authentication and default model |
 | --- | --- | --- |
 | `copilot` | `github-copilot` | GitHub device login; `gpt-4.1` |
-| `openai` | `openai-codex` | ChatGPT/Codex browser login; `gpt-5.4-mini` |
+| `openai` | `openai-codex` | ChatGPT/Codex browser login; `gpt-5.5` |
 | `api` | `openai-compatible` | Environment API key; initially `gpt-4.1-mini` |
 
 **`login openai` uses ChatGPT/Codex subscription access, not OpenAI Platform API
 billing.** An eligible account, available usage allowance, and applicable
 organization permissions are required. Copilot likewise requires Copilot access.
-Logging in does not grant access to every catalog model.
+Logging in does not grant access to every catalog model. `models` lists the
+adapter's bundled catalog, not live account availability; it can include retired
+or unavailable models.
 
 ```sh
 jevcode auth status
 jevcode models copilot
 jevcode models openai
-jevcode login openai --model gpt-5.4-mini
+jevcode login openai --model gpt-5.5
 jevcode run --provider copilot --model gpt-4.1 "Explain this project"
 jevcode run --provider openai "Investigate this bug"
 jevcode run --provider api --model gpt-4.1-mini "Explain the tests"
@@ -97,6 +99,14 @@ jevcode logout openai
 provider permanently without another login, edit `llm.provider` and `llm.model`.
 Old configs without `llm.provider` remain in API-key mode. Missing account
 credentials never silently fall back to an API key.
+
+If an older workspace still selects `gpt-5.4-mini` and Codex rejects it, try
+`jevcode run --provider openai --model gpt-5.5 "Explain this project"`.
+To keep that selection, change `llm.model` in `.jev/config.json` to `gpt-5.5`;
+updating the CLI does not overwrite existing model choices. Model availability
+and allowance consumption depend on your account. Unsupported-model errors now
+name the selected model and include the HTTP status when available, without
+exposing raw provider responses or credentials.
 
 These are community-maintained integrations from `@earendil-works/pi-ai`, not
 official Copilot/Codex agent runtimes. Only authentication and model transport are
