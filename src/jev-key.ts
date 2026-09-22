@@ -6,6 +6,15 @@ import path from "node:path";
 import { isMissing } from "./errors.js";
 import { readText, resolvePath } from "./workspace.js";
 
+export function normalizeJevKey(key: string): string {
+  const trimmed = key.trim();
+  if (!trimmed || trimmed.length > 16_000 || /[\u0000-\u001f\u007f\s"'<>]/.test(trimmed) ||
+    /^(?:Bearer\b|Authorization:)/i.test(trimmed)) {
+    throw new Error("Invalid Jev API key. Enter only the key, without an Authorization/Bearer prefix, quotes, or internal whitespace.");
+  }
+  return trimmed;
+}
+
 async function directory(base: string, create: boolean): Promise<string> {
   const root = await realpath(base);
   const dir = await resolvePath(root, ".jev-code", create);
@@ -29,19 +38,19 @@ export async function readJevKey(base = homedir()): Promise<string | undefined> 
     let key: unknown;
     try { key = JSON.parse(await readText(filename, 32_000)).key; }
     catch { throw new Error("Invalid Jev key file; run jevcode jev setup"); }
-    if (typeof key !== "string" || !key.trim() || /[\r\n\0]/.test(key)) throw new Error("Invalid Jev key file; run jevcode jev setup");
-    return key;
+    if (typeof key !== "string") throw new Error("Invalid Jev key file; run jevcode jev setup");
+    return normalizeJevKey(key);
   } catch (error) { if (isMissing(error)) return undefined; throw error; }
 }
 
 export async function saveJevKey(key: string, base = homedir()): Promise<void> {
-  if (!key.trim() || key.length > 16_000 || /[\r\n\0]/.test(key)) throw new Error("Invalid Jev API key");
+  const normalized = normalizeJevKey(key);
   const dir = await directory(base, true);
   const filename = await resolvePath(dir, "jev-key.json", true);
   const temporary = path.join(dir, `.jev-key-${randomUUID()}.tmp`);
   try {
     const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    try { await file.writeFile(JSON.stringify({ key })); await file.sync(); } finally { await file.close(); }
+    try { await file.writeFile(JSON.stringify({ key: normalized })); await file.sync(); } finally { await file.close(); }
     await resolvePath(dir, "jev-key.json", true);
     await rename(temporary, filename);
   } finally { try { await unlink(temporary); } catch (error) { if (!isMissing(error)) throw error; } }

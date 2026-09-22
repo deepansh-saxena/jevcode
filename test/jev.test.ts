@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fixture, options, scripted, final, call, server, requestBody } from "./helpers.js";
 import { run } from "../src/runtime.js";
-import { ensureShareable } from "../src/jev.js";
+import { ensureShareable, JevClient } from "../src/jev.js";
 import type { Message } from "../src/llm.js";
 
 function answer(questions: Record<string, unknown>): Record<string, unknown> {
@@ -34,7 +34,7 @@ test("Jev batches multi-skill and delegation decisions; mandatory skills are ret
   const url = await server(t, (request, response) => {
     void requestBody(request).then((body) => {
       requests++;
-      assert.equal(request.headers.authorization, "test-jev-key");
+      assert.equal(request.headers.authorization, "Bearer test-jev-key");
       assert.equal(body.model, "jev-latest");
       assert.ok(!JSON.stringify(body).includes("Explain usage."));
       const questions = body.questions as Record<string, unknown>;
@@ -52,6 +52,37 @@ test("Jev batches multi-skill and delegation decisions; mandatory skills are ret
   assert.equal(result.metrics.usageIncompleteRequests, 0);
 });
 
+test("Jev HTTP failures provide safe status-specific guidance and never retry or expose response bodies", async (t) => {
+  for (const [status, expected] of [
+    [401, /TypeSafe rejected the API key/], [403, /Access was denied/], [429, /rate limit/],
+    [422, /request format/], [529, /server error/],
+  ] as const) {
+    const project = await fixture(t);
+    let requests = 0;
+    const url = await server(t, (request, response) => {
+      assert.equal(request.headers.authorization, "Bearer private-synthetic-key");
+      requests++;
+      response.writeHead(status, { "Content-Type": "text/html", "x-private": "PRIVATE_HEADER" });
+      response.end("<html>PRIVATE_ERROR_BODY private-synthetic-key</html>");
+    });
+    Object.assign(project.config.jev, { allowDataSharing: true, endpoint: url });
+    const events: unknown[] = [];
+    const client = new JevClient(project.config.jev, "  private-synthetic-key  ", (event, data) => events.push({ event, data }), () => {
+      assert.fail("Failed requests must not invent reported usage");
+    });
+    await assert.rejects(client.evaluate({ purpose: "test" }, {
+      ready: { type: "noul", instructions: "Is this a test?" },
+    }, new AbortController().signal), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, expected);
+      assert.ok(error.message.includes(`HTTP ${status}`));
+      assert.doesNotMatch(error.message, /PRIVATE_ERROR_BODY|PRIVATE_HEADER|private-synthetic-key/);
+      return true;
+    });
+    assert.equal(requests, 1);
+    assert.doesNotMatch(JSON.stringify(events), /PRIVATE_ERROR_BODY|PRIVATE_HEADER|private-synthetic-key/);
+  }
+});
 test("shadow routing records suggestions without changing execution", async (t) => {
   const project = await fixture(t);
   const events: { event: string; data: unknown }[] = [];

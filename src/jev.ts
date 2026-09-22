@@ -2,8 +2,9 @@ import { z } from "zod";
 import type { Config } from "./config.js";
 import { BlockedError, LimitError, errorMessage } from "./errors.js";
 import type { Emit } from "./events.js";
-import { postJson, type Usage } from "./http.js";
+import { HttpError, postJson, type Usage } from "./http.js";
 import type { Project } from "./registry.js";
+import { normalizeJevKey } from "./jev-key.js";
 
 const probability = z.number().min(0).max(1);
 const answerSchema = z.discriminatedUnion("type", [
@@ -49,11 +50,12 @@ export class JevClient {
   async evaluate(state: unknown, questions: Record<string, Question>, signal: AbortSignal): Promise<Record<string, Answer>> {
     if (!this.config.allowDataSharing) throw new BlockedError("Jev data sharing is not enabled");
     if (!this.key) throw new Error(`Missing ${this.config.apiKeyEnv}`);
+    const key = normalizeJevKey(this.key);
     ensureShareable({ state, questions });
     const started = performance.now();
     this.emit("jev_request", { questionCount: Object.keys(questions).length });
     try {
-      const raw = await postJson(this.config.endpoint, this.key, {
+      const raw = await postJson(this.config.endpoint, `Bearer ${key}`, {
         model: this.config.model, state, questions,
       }, signal, this.config.timeoutMs);
       const parsed = responseSchema.safeParse(raw);
@@ -79,8 +81,22 @@ export class JevClient {
       this.emit("jev_response", { model: parsed.data.model, durationMs: Math.round(performance.now() - started) });
       return answers;
     } catch (error) {
-      this.emit("jev_error", { durationMs: Math.round(performance.now() - started), reason: errorMessage(error) });
-      throw error;
+      let failure = error;
+      if (error instanceof HttpError) {
+        const guidance = error.status === 401 ?
+          "TypeSafe rejected the API key. Check or replace it at https://console.typesafe.ai/keys. Copilot/OpenAI login does not provide Jev access." :
+          error.status === 403 ?
+          "Access was denied. Check the TypeSafe key's account/API permissions and configured endpoint/model. If access should be enabled, contact TypeSafe support." :
+          error.status === 429 ?
+          "TypeSafe reported a rate limit. Wait before retrying." :
+          error.status === 422 || error.status === 400 ?
+          "TypeSafe rejected the request format. Check the configured model and adapter compatibility." :
+          error.status >= 500 ?
+          "TypeSafe reported a server error. Retry later." : "Unexpected HTTP response from TypeSafe.";
+        failure = new Error(`Jev request failed (HTTP ${error.status}): ${guidance} The request was not retried; sensitive response details were withheld.`);
+      }
+      this.emit("jev_error", { durationMs: Math.round(performance.now() - started), reason: errorMessage(failure) });
+      throw failure;
     }
   }
 }

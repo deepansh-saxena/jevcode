@@ -298,6 +298,21 @@ With explicit approval it stores the key in private
 key; `jevcode jev off` disables routing without weakening required guardrails.
 The same private-file limitations as OAuth credentials apply.
 
+Setup confirmation accepts `y` or `yes` (case-insensitive); executing writes and
+commands still requires the full word `yes`. Paste only the API key from
+[TypeSafe's key dashboard](https://console.typesafe.ai/keys), without quotes or
+an `Authorization`/`Bearer` prefix. Surrounding whitespace is trimmed; the adapter
+adds the required Bearer scheme itself.
+
+If you encountered HTTP 403 with an earlier build, rebuild and rerun setup: the
+old adapter omitted the Bearer scheme. Failed connection tests do not save the
+entered key or change workspace settings. HTTP 401 indicates a rejected key;
+a remaining 403 indicates denied access and requires checking the account/API
+permissions, endpoint, or model with TypeSafe. Setup identifies whether it is
+using an environment key, saved key, or newly entered key, without displaying it.
+Update or unset a rejected `TYPESAFE_API_KEY` environment value; use
+`jevcode jev logout` before replacing a rejected saved key.
+
 Alternatively, edit these fields inside the
 existing `jev` object in `.jev/config.json`:
 
@@ -516,6 +531,6 @@ protocols may need updates as providers change. Dependencies retain their own
 package licenses. The official Codex agent runtime is not embedded.
 
 The Jev adapter follows the published
-[HTTP API](https://docs.typesafe.ai/api), including the raw API-key Authorization
+[HTTP API](https://docs.typesafe.ai/api), including the Bearer API-key Authorization
 header and typed Noul/Choice answers. See [PLAN.md](PLAN.md) for the longer-term
 architecture and evaluation gates.

@@ -3,6 +3,13 @@ export interface Usage {
   outputTokens: number;
 }
 
+export class HttpError extends Error {
+  constructor(readonly status: number) {
+    super(`API request failed with HTTP ${status}; request was not retried`);
+    this.name = "HttpError";
+  }
+}
+
 export async function postJson(
   url: string, authorization: string, body: unknown, signal: AbortSignal, timeoutMs: number,
 ): Promise<unknown> {
@@ -15,7 +22,7 @@ export async function postJson(
   });
   if (!response.ok) {
     await response.body?.cancel();
-    throw new Error(`API request failed with HTTP ${response.status}; request was not retried`);
+    throw new HttpError(response.status);
   }
   if (!response.body) throw new Error("API returned an empty response");
   const reader = response.body.getReader();
