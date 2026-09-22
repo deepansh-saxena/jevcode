@@ -1,7 +1,9 @@
 # Jev-assisted coding harness
 
-Status: initial standalone TypeScript MVP implemented. Live-provider smoke runs
-and comparative cost/latency evaluation are outstanding.
+Status: interactive standalone TypeScript harness implemented with Jev routing,
+private session save/resume, and evaluation tooling. Codex chat/tool smoke runs
+have completed. Live Jev validation, representative held-out evaluation, and
+broader deployment gates remain outstanding.
 
 ## Implementation snapshot
 
@@ -18,16 +20,28 @@ Account login includes private per-user credential files, token refresh,
 status/logout, catalog discovery, and per-run provider/model overrides. Provider
 transports still return tool calls to this harness for validation and approval.
 
-This is not completion of every stage below. Commands are not sandboxed; no
-OS-enforced filesystem/network isolation is provided. Specialist reports are
-freeform text in a status envelope. Model routing, persistent/resumable
-conversations, semantic compaction, dollar budgets, a benchmark runner, and calibrated
-guardrail thresholds remain future work. No savings have been demonstrated.
+Interactive `jevcode` now retains conversation and provider-native history,
+streams subscription text, shows tool/routing activity, accepts queued follow-ups,
+and supports cancellation and explicit private snapshots/resume. Skills can load
+bounded reference resources and name approval-gated configured commands.
+New specialist manifests request validated structured reports; legacy text
+manifests remain compatible. Jev setup includes hidden key entry, independent
+skill/delegation switches, per-user-task routing, and mutation-guardrail shadow
+evaluation. Reproducible read-only baseline/Jev trials and labeled scope-check
+evaluation are available through CLI commands and development examples.
+
+This is not completion of every release gate below. Commands are not sandboxed;
+OS-enforced filesystem/network isolation, semantic compaction, dollar-spend
+policy, held-out calibration, and demonstrated savings remain outstanding.
+Model routing, metadata caching, and parallel specialists remain deferred under
+stage 6 until a measured bottleneck justifies them. The benchmark's literal
+answer checks do not establish full coding-task correctness.
 
 The runtime now prunes older read-only tool output into explicitly marked
 excerpts under context pressure. It preserves instructions, native assistant
 history, call/result pairs, and mutation outcomes without an extra model call;
-this is not semantic summarization or resumable conversation storage.
+this is not semantic summarization. Explicit snapshots separately provide
+resumable conversation storage.
 
 See [README.md](README.md) for setup, actual behavior, data-sharing implications,
 and current limitations. The stages and release gates below remain the roadmap.

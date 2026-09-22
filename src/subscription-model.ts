@@ -1,9 +1,10 @@
 import {
-  completeSimple, getModels, type Api, type AssistantMessage, type Context,
+  completeSimple, streamSimple, getModels, type Api, type AssistantMessage, type Context,
   type Model, type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { getOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { Type } from "typebox";
+import { z } from "zod";
 import type { AccountProvider, AuthManager } from "./auth.js";
 import type { Config } from "./config.js";
 import type { CodingModel, Completion, Message, ToolSpec } from "./llm.js";
@@ -54,8 +55,32 @@ function requestFailure(provider: AccountProvider, model: string, error: unknown
 }
 
 export type SubscriptionTransport = (
-  model: Model<Api>, context: Context, options: SimpleStreamOptions,
+  model: Model<Api>, context: Context, options: SimpleStreamOptions, onText?: (text: string) => void,
 ) => Promise<AssistantMessage>;
+
+const nativeMessageSchema = z.object({
+  role: z.literal("assistant"), api: z.string(), provider: z.string(), model: z.string(),
+  responseId: z.string().optional(),
+  content: z.array(z.discriminatedUnion("type", [
+    z.object({ type: z.literal("text"), text: z.string(), textSignature: z.string().optional() }),
+    z.object({ type: z.literal("thinking"), thinking: z.string(), thinkingSignature: z.string().optional(), redacted: z.boolean().optional() }),
+    z.object({ type: z.literal("toolCall"), id: z.string(), name: z.string(), arguments: z.record(z.string(), z.unknown()), thoughtSignature: z.string().optional() }),
+  ])),
+  usage: z.object({
+    input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number(), totalTokens: z.number(),
+    cost: z.object({ input: z.number(), output: z.number(), cacheRead: z.number(), cacheWrite: z.number(), total: z.number() }),
+  }),
+  stopReason: z.enum(["stop", "length", "toolUse", "error", "aborted"]), timestamp: z.number(),
+});
+
+const subscriptionTransport: SubscriptionTransport = async (model, context, options, onText) => {
+  if (!onText) return completeSimple(model, context, options);
+  const stream = streamSimple(model, context, options);
+  for await (const event of stream) {
+    if (event.type === "text_delta") onText(event.delta);
+  }
+  return stream.result();
+};
 
 export class SubscriptionModel implements CodingModel {
   private history = new WeakMap<Message, AssistantMessage>();
@@ -64,8 +89,45 @@ export class SubscriptionModel implements CodingModel {
     private config: Config["llm"],
     private provider: AccountProvider,
     private auth: AuthManager,
-    private transport: SubscriptionTransport = completeSimple,
+    private transport: SubscriptionTransport = subscriptionTransport,
   ) {}
+
+  exportHistory(messages: Message[]): unknown {
+    return messages.filter((message) => message.role === "assistant").map((message) =>
+      nativeMessageSchema.parse(this.history.get(message)));
+  }
+
+  restoreHistory(messages: Message[], history: unknown): void {
+    const parsed = z.array(nativeMessageSchema).parse(history);
+    const assistants = messages.filter((message) => message.role === "assistant");
+    if (assistants.length !== parsed.length) throw new Error("Saved provider history is incomplete");
+    for (const [index, message] of assistants.entries()) {
+      const native = parsed[index]!;
+      const calls = native.content.filter((block) => block.type === "toolCall").map((block) => ({
+        id: block.id, type: "function", function: { name: block.name, arguments: JSON.stringify(block.arguments) },
+      }));
+      const text = native.content.filter((block) => block.type === "text").map((block) => block.text).join("\n") || null;
+      if (native.provider !== this.provider || JSON.stringify(calls) !== JSON.stringify(message.tool_calls ?? []) ||
+        text !== message.content) throw new Error("Saved provider history does not match the conversation");
+      const content: AssistantMessage["content"] = native.content.map((block) => {
+        if (block.type === "text") return {
+          type: block.type, text: block.text, ...(block.textSignature !== undefined ? { textSignature: block.textSignature } : {}),
+        };
+        if (block.type === "thinking") return {
+          type: block.type, thinking: block.thinking,
+          ...(block.thinkingSignature !== undefined ? { thinkingSignature: block.thinkingSignature } : {}),
+          ...(block.redacted !== undefined ? { redacted: block.redacted } : {}),
+        };
+        return { type: block.type, id: block.id, name: block.name, arguments: block.arguments,
+          ...(block.thoughtSignature !== undefined ? { thoughtSignature: block.thoughtSignature } : {}) };
+      });
+      this.history.set(message, {
+        role: native.role, api: native.api, provider: native.provider, model: native.model, content,
+        usage: native.usage, timestamp: native.timestamp, stopReason: native.stopReason,
+        ...(native.responseId !== undefined ? { responseId: native.responseId } : {}),
+      });
+    }
+  }
 
   private context(messages: Message[], tools: ToolSpec[]): Context {
     const context: Context = {
@@ -111,7 +173,7 @@ export class SubscriptionModel implements CodingModel {
     await this.auth.credentials(this.provider, AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]));
   }
 
-  async complete(messages: Message[], tools: ToolSpec[], modelId: string, signal: AbortSignal): Promise<Completion> {
+  async complete(messages: Message[], tools: ToolSpec[], modelId: string, signal: AbortSignal, onText?: (text: string) => void): Promise<Completion> {
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]);
     deadline.throwIfAborted();
     const base = accountModel(this.provider, modelId);
@@ -132,7 +194,7 @@ export class SubscriptionModel implements CodingModel {
             httpStatus = metadata.status;
           }
         },
-      });
+      }, onText);
     } catch (error) {
       deadline.throwIfAborted();
       throw requestFailure(this.provider, modelId, error, httpStatus);

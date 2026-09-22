@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "split": "development",
+  "feature": "skills",
+  "repetitions": 3,
+  "seed": 42,
+  "tasks": [
+    {
+      "id": "trace-export",
+      "task": "Read the source files and identify the exported function name and the arithmetic operation it performs. Do not modify files.",
+      "files": {
+        "src/math.ts": "export function add(a: number, b: number): number { return a + b; }\n"
+      },
+      "answerIncludes": ["add"],
+      "answerExcludes": [],
+      "minToolCalls": 1
+    }
+  ]
+}

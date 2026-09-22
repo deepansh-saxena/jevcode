@@ -44,6 +44,7 @@ export async function initialize(root: string): Promise<void> {
       role: "Investigate the requested problem without changing files. Return findings with file paths, evidence, and a suggested fix. Explicitly identify unknowns.",
       skills: ["testing"], tools: ["list_files", "read_file", "search_files"],
       maxTurns: 5, maxToolCalls: 10,
+      resultFormat: "structured",
     }, null, 2),
   };
   for (const [relative, content] of Object.entries(files)) {

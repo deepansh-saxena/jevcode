@@ -10,16 +10,23 @@ import { errorMessage } from "./errors.js";
 import { providerName } from "./auth.js";
 import { defaultAuthManager } from "./auth-driver.js";
 import { terminalSafe } from "./terminal.js";
+import { readText } from "./workspace.js";
 
 const help = `Jev Code - local coding harness
 
 Usage:
+  jevcode [--cwd DIR] [--provider copilot|openai|api] [--model ID]
+          [--write] [--commands] [--resume UUID]
+  jevcode chat [same options]
   jevcode init [--cwd DIR]
   jevcode inspect [--cwd DIR]
   jevcode login <copilot|openai> [--cwd DIR] [--model ID]
   jevcode logout <copilot|openai>
   jevcode auth status
   jevcode models <copilot|openai>
+  jevcode jev <setup|status|off|logout> [--cwd DIR]
+  jevcode benchmark <suite.json> [--cwd DIR]
+  jevcode evaluate-guardrails <suite.json> [--cwd DIR]
   jevcode run [--cwd DIR] [--skill ID ...] [--specialist ID]
                [--provider copilot|openai|api] [--model ID]
                [--write] [--commands] [--json] "task"
@@ -43,12 +50,33 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       specialist: { type: "string" }, write: { type: "boolean" },
       commands: { type: "boolean" }, json: { type: "boolean" },
       provider: { type: "string" }, model: { type: "string" },
+      resume: { type: "string" },
       help: { type: "boolean", short: "h" },
     },
   });
-  if (values.help || !positionals.length) { process.stdout.write(help); return; }
-  const command = positionals[0];
+  if (values.help || (!positionals.length && !process.stdin.isTTY)) { process.stdout.write(help); return; }
+  const command = positionals[0] ?? "chat";
   const root = path.resolve(values.cwd ?? process.cwd());
+  if (command === "benchmark" || command === "evaluate-guardrails") {
+    if (positionals.length !== 2) throw new Error(`Usage: jevcode ${command} <suite.json>`);
+    const project = await loadProject(root);
+    const suite = JSON.parse(await readText(await project.workspace.path(positionals[1]!), 1_000_000));
+    const { benchmark, evaluateGuardrails } = await import("./evaluation.js");
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(new Error("Evaluation cancelled by user"));
+    process.on("SIGINT", abort);
+    try {
+      process.stdout.write(`${JSON.stringify(await (command === "benchmark" ?
+        benchmark(project, suite, controller.signal) : evaluateGuardrails(project, suite, controller.signal)), null, 2)}\n`);
+    } finally { process.removeListener("SIGINT", abort); }
+    return;
+  }
+  if (command === "jev") {
+    if (positionals.length !== 2) throw new Error("Usage: jevcode jev <setup|status|off|logout>");
+    const { configureJev } = await import("./jev-cli.js");
+    await configureJev(root, positionals[1]!);
+    return;
+  }
   if (command === "auth") {
     if (positionals.length !== 2 || positionals[1] !== "status") throw new Error("Usage: jevcode auth status");
     process.stdout.write(`${JSON.stringify(await defaultAuthManager().status(), null, 2)}\n`);
@@ -77,7 +105,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     process.stdout.write("Created .jev/ with separate skills and specialists. Set the model and credentials before running.\n");
     return;
   }
-  if (command !== "inspect" && command !== "run") throw new Error(`Unknown command: ${command}`);
+  if (command !== "inspect" && command !== "run" && command !== "chat") throw new Error(`Unknown command: ${command}`);
   const project = await loadProject(root);
   if (command === "inspect") {
     if (positionals.length !== 1) throw new Error("inspect does not take a task");
@@ -89,8 +117,6 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }, null, 2)}\n`);
     return;
   }
-  const task = positionals.slice(1).join(" ").trim();
-  if (!task) throw new Error("run requires a task");
   if (values.provider) {
     const provider = providerName(values.provider);
     if (provider !== project.config.llm.provider && !values.model) {
@@ -100,11 +126,23 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     project.config.llm.provider = provider;
   }
   if (values.model) project.config.llm.model = values.model;
+  if (command === "chat") {
+    if (positionals.length > 1 || values.json) throw new Error("Chat accepts options, not a task or --json; type your task at the prompt");
+    const { chat } = await import("./chat.js");
+    await chat(project, {
+      skills: values.skill ?? [], ...(values.specialist ? { specialistId: values.specialist } : {}),
+      permissions: { write: values.write ?? false, commands: values.commands ?? false },
+    }, values.resume);
+    return;
+  }
+  if (values.resume) throw new Error("--resume is only supported by interactive chat");
+  const task = positionals.slice(1).join(" ").trim();
+  if (!task) throw new Error("run requires a task");
   const controller = new AbortController();
   const abort = (): void => controller.abort(new Error("Cancelled by user"));
   process.on("SIGINT", abort);
   const log = await createEventLog(project.workspace.root, (event, data = {}) => {
-    if (["routing_fallback", "jev_error", "tool_error", "specialist_limit"].includes(event)) {
+    if (["routing_fallback", "jev_error", "tool_error", "specialist_limit", "specialist_report_invalid", "guardrail_shadow"].includes(event)) {
       process.stderr.write(terminalSafe(`[${event}] ${JSON.stringify(data)}\n`));
     }
   });

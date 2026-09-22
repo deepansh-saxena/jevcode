@@ -9,6 +9,7 @@ import { run } from "../src/runtime.js";
 import { fixture, options, server, requestBody } from "./helpers.js";
 import type { Message } from "../src/llm.js";
 import { digest } from "../src/workspace.js";
+import { saveSession, restoreSession } from "../src/session.js";
 
 function native(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
   return {
@@ -70,6 +71,59 @@ test("subscription adapter preserves native reasoning/signatures and maps tool r
   await adapter.complete(messages, [], "gpt-5.4-mini", new AbortController().signal);
 });
 
+test("subscription snapshots preserve native signatures across a fresh adapter without storing credentials", async (t) => {
+  const project = await fixture(t);
+  project.config.llm.provider = "openai-codex";
+  project.config.llm.model = "gpt-5.5";
+  const manager = await auth(project.workspace.root);
+  const first = new SubscriptionModel(project.config.llm, "openai-codex", manager, async () => native({
+    model: "gpt-5.5", content: [
+      { type: "thinking", thinking: "Reasoning", thinkingSignature: "opaque-saved-signature" },
+      { type: "text", text: "Remembered cobalt", textSignature: "saved-text-signature" },
+    ],
+  }));
+  const messages: Message[] = [{ role: "user", content: "Remember cobalt" }];
+  messages.push((await first.complete(messages, [], "gpt-5.5", new AbortController().signal)).message);
+  const id = await saveSession(project, messages, first);
+  const second = new SubscriptionModel(project.config.llm, "openai-codex", manager, async (_model, context) => {
+    assert.match(JSON.stringify(context), /opaque-saved-signature/);
+    assert.match(JSON.stringify(context), /saved-text-signature/);
+    return native();
+  });
+  const restored = await restoreSession(project, id, second);
+  restored.push({ role: "user", content: "Which word?" });
+  assert.equal((await second.complete(restored, [], "gpt-5.5", new AbortController().signal)).finishReason, "stop");
+  const { readFile } = await import("node:fs/promises");
+  const snapshot = await readFile(path.join(project.workspace.root, `.jev/sessions/${id}.json`), "utf8");
+  assert.doesNotMatch(snapshot, /fake-provider-access|fake-refresh/);
+});
+
+test("default subscription streaming transport emits text but not reasoning or arguments", async (t) => {
+  const project = await fixture(t);
+  const payload = Buffer.from(JSON.stringify({
+    "https://api.openai.com/auth": { chatgpt_account_id: "fake-account" },
+  })).toString("base64");
+  const manager = await auth(project.workspace.root, `fake.${payload}.signature`);
+  const item = { type: "message", id: "message-1", role: "assistant", content: [{ type: "output_text", text: "Streamed" }] };
+  const events = [
+    { type: "response.output_item.added", item: { ...item, content: [] } },
+    { type: "response.content_part.added", part: { type: "output_text", text: "" } },
+    { type: "response.output_text.delta", delta: "Stream" },
+    { type: "response.output_text.delta", delta: "ed" },
+    { type: "response.output_item.done", item },
+    { type: "response.completed", response: { status: "completed", usage: { input_tokens: 2, output_tokens: 1, total_tokens: 3 } } },
+  ];
+  t.mock.method(globalThis, "fetch", async () => new Response(
+    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    { headers: { "Content-Type": "text/event-stream" } },
+  ));
+  const adapter = new SubscriptionModel(project.config.llm, "openai-codex", manager);
+  const chunks: string[] = [];
+  const result = await adapter.complete([{ role: "user", content: "Say streamed" }], [],
+    "gpt-5.5", new AbortController().signal, (text) => chunks.push(text));
+  assert.deepEqual(chunks, ["Stream", "ed"]);
+  assert.equal(result.message.content, "Streamed");
+});
 test("context pruning preserves native signatures and uses provider-native size accounting", async (t) => {
   for (const signatureLength of [12_000, 45_000]) {
     const project = await fixture(t);

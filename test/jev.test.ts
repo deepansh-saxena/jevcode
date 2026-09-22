@@ -5,6 +5,7 @@ import path from "node:path";
 import { fixture, options, scripted, final, call, server, requestBody } from "./helpers.js";
 import { run } from "../src/runtime.js";
 import { ensureShareable } from "../src/jev.js";
+import type { Message } from "../src/llm.js";
 
 function answer(questions: Record<string, unknown>): Record<string, unknown> {
   const answers: Record<string, unknown> = {};
@@ -66,6 +67,52 @@ test("shadow routing records suggestions without changing execution", async (t) 
   assert.match(JSON.stringify(events.find((event) => event.event === "routing")), /suggested.*investigator/);
 });
 
+test("independent routing switches and follow-up context avoid sharing tool results", async (t) => {
+  const project = await fixture(t);
+  const conversation: Message[] = [
+    { role: "user", content: "Original user task" },
+    { role: "assistant", content: "PRIVATE_ASSISTANT_HISTORY" },
+  ];
+  const url = await server(t, (request, response) => {
+    void requestBody(request).then((body) => {
+      assert.ok(!JSON.stringify(body).includes("PRIVATE_ASSISTANT_HISTORY"));
+      assert.match(JSON.stringify(body.state), /followup/);
+      assert.match(JSON.stringify(body.state), /Original user task/);
+      const questions = body.questions as Record<string, unknown>;
+      assert.equal(questions.delegation, undefined);
+      assert.equal(Object.keys(questions).length, 1);
+      response.end(JSON.stringify(answer(questions)));
+    });
+  });
+  Object.assign(project.config.jev, { mode: "on", allowDataSharing: true, routeSpecialists: false, endpoint: url });
+  const result = await run(project, options(scripted([final()]), {
+    conversation, env: { TYPESAFE_API_KEY: "key" },
+  }));
+  assert.deepEqual(result.route, { skillIds: ["coding", "testing"], specialistId: null });
+});
+
+test("guardrail shadow failures and low scores are observable but never bypass action approval", async (t) => {
+  for (const outage of [false, true]) {
+    const project = await fixture(t);
+    const events: { event: string; data: unknown }[] = [];
+    const url = await server(t, (_request, response) => {
+      if (outage) { response.writeHead(503); response.end(); return; }
+      response.end(JSON.stringify({ model: "jev-test", answers: { scope: { type: "noul", noul: 0.1 } },
+        usage: { input_tokens: 1, output_tokens: 1 } }));
+    });
+    Object.assign(project.config.jev, { guardrail: "shadow", allowDataSharing: true, endpoint: url });
+    let approvals = 0;
+    const result = await run(project, options(scripted([call("write_file", { path: "no.txt", content: "no", expectedHash: null })]), {
+      permissions: { write: true, commands: false }, env: { TYPESAFE_API_KEY: "key" },
+      approve: async () => { approvals++; return false; },
+      emit: (event, data) => events.push({ event, data }),
+    }));
+    assert.equal(result.status, "blocked");
+    assert.equal(approvals, 1);
+    assert.ok(events.some(({ event }) => event === "guardrail_shadow"));
+    await assert.rejects(project.workspace.read("no.txt"), /ENOENT/);
+  }
+});
 test("low confidence, low relevance and abstention preserve the direct baseline", async (t) => {
   for (const choice of ["specialist_investigator", "abstain"]) {
     const project = await fixture(t);

@@ -24,8 +24,10 @@ export interface Completion {
   finishReason: string;
 }
 export interface CodingModel {
-  complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal): Promise<Completion>;
+  complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal, onText?: (text: string) => void): Promise<Completion>;
   contextSize?(messages: Message[], tools: ToolSpec[]): number;
+  exportHistory?(messages: Message[]): unknown;
+  restoreHistory?(messages: Message[], history: unknown): void;
 }
 
 export async function createCodingModel(config: Config["llm"], env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<CodingModel> {
@@ -61,7 +63,7 @@ const responseSchema = z.object({
 export class OpenAICompatible implements CodingModel {
   constructor(private config: Config["llm"], private key: string) {}
 
-  async complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal): Promise<Completion> {
+  async complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal, onText?: (text: string) => void): Promise<Completion> {
     const raw = await postJson(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`,
       `Bearer ${this.key}`, {
         model, messages, max_completion_tokens: this.config.maxOutputTokens,
@@ -77,6 +79,7 @@ export class OpenAICompatible implements CodingModel {
     if (calls && new Set(calls.map((call) => call.id)).size !== calls.length) {
       throw new Error("Coding model returned duplicate tool call IDs");
     }
+    if (choice.message.content) onText?.(choice.message.content);
     return {
       message: {
         role: "assistant", content: choice.message.content,

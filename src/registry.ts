@@ -47,6 +47,13 @@ export async function loadProject(root: string): Promise<Project> {
       throw new Error(`Skill ${skill.id}: instructions must be under .jev/skills/`);
     }
     await resolvePath(initial.root, skill.instructions);
+    for (const resource of skill.resources ?? []) {
+      if (!resource.startsWith(".jev/skills/")) throw new Error(`Skill ${skill.id}: resources must be under .jev/skills/`);
+      await resolvePath(initial.root, resource);
+    }
+    for (const id of skill.commandIds ?? []) {
+      if (!Object.hasOwn(config.commands, id)) throw new Error(`Skill ${skill.id}: unknown configured command ${id}`);
+    }
   }
   for (const specialist of specialists) {
     for (const id of specialist.skills) {
@@ -70,8 +77,12 @@ export async function loadSkills(project: Project, ids: string[]): Promise<{ ids
     const skill = project.skills.find((candidate) => candidate.id === id);
     if (!skill) throw new Error(`Unknown skill: ${id}`);
     const content = await readText(await resolvePath(project.workspace.root, skill.instructions), 100_000);
-    const section = `## Skill: ${skill.id} (${skill.version})\n${content}`;
-    length += section.length;
+    const resources = await Promise.all((skill.resources ?? []).map(async (resource) =>
+      `Resource ${resource}:\n${await readText(await resolvePath(project.workspace.root, resource), 100_000)}`));
+    const commands = skill.commandIds?.length ?
+      `Configured command references: ${skill.commandIds.join(", ")}. Only use run_command if available; each execution still requires approval.` : "";
+    const section = [`## Skill: ${skill.id} (${skill.version})\n${content}`, ...resources, commands].filter(Boolean).join("\n\n");
+    length += section.length + (sections.length ? 2 : 0);
     if (length > project.config.limits.maxSkillChars) throw new Error("Selected skills exceed the context budget");
     sections.push(section);
   }
@@ -79,19 +90,23 @@ export async function loadSkills(project: Project, ids: string[]): Promise<{ ids
 }
 
 export async function selectAccountProvider(project: Project, provider: AccountProvider, model: string): Promise<void> {
+  await updateProjectConfig(project, (config) => { config.llm.provider = provider; config.llm.model = model; });
+}
+
+export async function updateProjectConfig(project: Project, update: (config: Config) => void): Promise<void> {
   const filename = await resolvePath(project.workspace.root, ".jev/config.json");
   const original = await readText(filename, 64_000);
   const config = configSchema.parse(JSON.parse(original));
   if (JSON.stringify(config) !== JSON.stringify(project.config)) {
-    throw new Error("Workspace config changed during login; credentials were saved but provider selection was not changed");
+    throw new Error("Workspace config changed; settings were not overwritten");
   }
-  config.llm.provider = provider;
-  config.llm.model = model;
+  update(config);
+  const validated = configSchema.parse(config);
   const temporary = path.join(path.dirname(filename), `.config-${randomUUID()}.tmp`);
   try {
-    await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     if (await readText(await resolvePath(project.workspace.root, ".jev/config.json"), 64_000) !== original) {
-      throw new Error("Workspace config changed during login; credentials were saved but provider selection was not changed");
+      throw new Error("Workspace config changed; settings were not overwritten");
     }
     await rename(temporary, filename);
   } finally {

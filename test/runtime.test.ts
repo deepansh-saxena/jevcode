@@ -90,7 +90,9 @@ test("approved exact action persists and stale hash errors return to the model",
 
 test("specialists have isolated contexts, inherited skills, and intersected tools", async (t) => {
   const project = await fixture(t);
-  const model = scripted([final("Evidence: file.ts has a bug."), final("Integrated findings.")], (messages, tools, index) => {
+  const model = scripted([final(JSON.stringify({
+    summary: "Evidence: file.ts has a bug.", findings: [], changes: [], checks: [], unresolved: [],
+  })), final("Integrated findings.")], (messages, tools, index) => {
     if (index === 0) {
       assert.match(messages[0]!.content!, /Specialist role/);
       assert.match(messages[0]!.content!, /# Testing/);
@@ -131,6 +133,23 @@ test("specialist local limits return an explicit partial report to the main agen
   assert.equal(result.metrics.turns, 2);
 });
 
+test("structured specialist reports validate evidence fields and reject malformed handoffs explicitly", async (t) => {
+  for (const valid of [false, true]) {
+    const project = await fixture(t);
+    project.specialists[0]!.resultFormat = "structured";
+    const report = { summary: "Found an issue", findings: [{ finding: "Missing check", evidence: ["file.ts:4"] }],
+      changes: [], checks: [], unresolved: ["Not executed"] };
+    const model = scripted([final(valid ? JSON.stringify(report) : "unstructured output"), final("Integrated")],
+      (messages, _tools, index) => {
+        if (!index) assert.match(messages[0]!.content!, /Return only a JSON object/);
+        else {
+          assert.match(messages.at(-1)!.content!, valid ? /file.ts:4/ : /invalid structured report/);
+          assert.doesNotMatch(messages.at(-1)!.content!, /unstructured output/);
+        }
+      });
+    assert.equal((await run(project, options(model, { specialistId: "investigator" }))).status, "completed");
+  }
+});
 test("shared turn, tool, token and context limits stop execution", async (t) => {
   for (const which of ["turn", "tool", "token", "context"]) {
     const project = await fixture(t);

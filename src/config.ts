@@ -39,7 +39,9 @@ export const configSchema = z.object({
     timeoutMs: z.number().int().min(100).max(60_000).default(10_000),
     skillThreshold: z.number().min(0).max(1).default(0.75),
     delegationConfidence: z.number().min(0).max(1).default(0.7),
-    guardrail: z.enum(["off", "mutations", "all"]).default("off"),
+    routeSkills: z.boolean().optional(),
+    routeSpecialists: z.boolean().optional(),
+    guardrail: z.enum(["off", "shadow", "mutations", "all"]).default("off"),
     guardrailThreshold: z.number().min(0).max(1).default(0.95),
   }).strict().default({
     mode: "off", endpoint: "https://api.typesafe.ai/v1/systemone", model: "jev-latest",
@@ -76,8 +78,11 @@ export const skillSchema = z.object({
   id: idSchema,
   version: z.string().min(1),
   description: z.string().min(1).max(2000),
+  applicability: z.string().max(2000).optional(),
   instructions: z.string().min(1),
   mandatory: z.boolean().default(false),
+  resources: z.array(z.string().min(1)).max(16).optional(),
+  commandIds: z.array(idSchema).max(16).optional(),
 }).strict();
 export type Skill = z.infer<typeof skillSchema>;
 
@@ -90,5 +95,6 @@ export const specialistSchema = z.object({
   tools: z.array(z.enum(toolNames)).min(1),
   maxTurns: z.number().int().min(1).max(20).default(5),
   maxToolCalls: z.number().int().min(1).max(40).default(10),
+  resultFormat: z.enum(["text", "structured"]).optional(),
 }).strict();
 export type Specialist = z.infer<typeof specialistSchema>;

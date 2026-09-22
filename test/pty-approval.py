@@ -2,6 +2,7 @@
 
 import errno
 import fcntl
+import json
 import os
 import pty
 import select
@@ -37,18 +38,22 @@ prompts = scenarios.get(
     os.environ.get("JEV_PTY_SCENARIO"),
     [(b"Type yes to execute this exact action:", b"yes\n")],
 )
+if "JEV_PTY_PROMPTS" in os.environ:
+    prompts = [(prompt.encode(), answer.encode()) for prompt, answer in json.loads(os.environ["JEV_PTY_PROMPTS"])]
 answered = 0
-deadline = time.monotonic() + 8
+answered_at = 0
+deadline = time.monotonic() + 15
 try:
     while time.monotonic() < deadline:
         if not select.select([master], [], [], 0.05)[0]:
             if child.poll() is not None:
                 break
             # Wait for redraws to settle before responding to a visible prompt.
-            visible_tail = output.rsplit(b"\x1b[0J", 1)[-1]
+            visible_tail = output[answered_at:].rsplit(b"\x1b[0J", 1)[-1]
             if answered < len(prompts) and prompts[answered][0] in visible_tail:
                 os.write(master, prompts[answered][1])
                 answered += 1
+                answered_at = len(output)
             continue
         try:
             chunk = os.read(master, 65536)
