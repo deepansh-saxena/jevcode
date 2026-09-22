@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.jev/
+.jev-code/
+.env
+.env.*
+*.log
+.DS_Store
+__pycache__/
+*.pyc
