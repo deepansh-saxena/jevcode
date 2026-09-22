@@ -8,6 +8,7 @@ import { SubscriptionModel, accountModel, defaultAccountModels } from "../src/su
 import { run } from "../src/runtime.js";
 import { fixture, options, server, requestBody } from "./helpers.js";
 import type { Message } from "../src/llm.js";
+import { digest } from "../src/workspace.js";
 
 function native(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
   return {
@@ -67,6 +68,46 @@ test("subscription adapter preserves native reasoning/signatures and maps tool r
   messages.push(completion.message, { role: "tool", tool_call_id: "call-1", content: '{"error":"File missing"}' });
   assert.ok(adapter.contextSize(messages, []) > JSON.stringify(messages).length);
   await adapter.complete(messages, [], "gpt-5.4-mini", new AbortController().signal);
+});
+
+test("context pruning preserves native signatures and uses provider-native size accounting", async (t) => {
+  for (const signatureLength of [12_000, 45_000]) {
+    const project = await fixture(t);
+    project.config.llm.model = "gpt-5.4-mini";
+    project.config.limits.maxContextChars = 40_000;
+    const content = "private file content\n".repeat(1_000);
+    await writeFile(path.join(project.workspace.root, "source.txt"), content);
+    const manager = await auth(project.workspace.root);
+    const response = native({
+      content: [
+        { type: "thinking", thinking: "Native reasoning", thinkingSignature: "s".repeat(signatureLength) },
+        ...[1, 2, 3, 4].map((id) => ({
+          type: "toolCall" as const, id: `read-${id}`, name: "read_file", arguments: { path: "source.txt", lineCount: 500 },
+        })),
+      ],
+      stopReason: "toolUse",
+    });
+    let requests = 0;
+    const adapter = new SubscriptionModel(project.config.llm, "openai-codex", manager, async (_model, context) => {
+      assert.ok(JSON.stringify(context).length <= 40_000);
+      if (requests++ === 0) return response;
+      assert.strictEqual(context.messages[1], response);
+      const results = context.messages.filter((message) => message.role === "toolResult");
+      assert.equal(results.length, 4);
+      assert.deepEqual(results.map((message) => message.toolCallId), ["read-1", "read-2", "read-3", "read-4"]);
+      const text = results[0]!.content[0]!;
+      assert.equal(text.type, "text");
+      if (text.type === "text") {
+        assert.equal(JSON.parse(text.text).contextPruned, true);
+        assert.equal(JSON.parse(text.text).sha256, digest(content));
+      }
+      return native();
+    });
+    const result = await run(project, options(adapter));
+    assert.equal(result.status, signatureLength === 12_000 ? "completed" : "limited", result.text);
+    assert.equal(requests, signatureLength === 12_000 ? 2 : 1);
+    if (signatureLength === 45_000) assert.match(result.text, /Context size limit reached/);
+  }
 });
 
 test("OAuth transport ignores custom API URLs and never exposes provider error bodies", async (t) => {

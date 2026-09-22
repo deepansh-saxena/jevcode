@@ -21,8 +21,13 @@ transports still return tool calls to this harness for validation and approval.
 This is not completion of every stage below. Commands are not sandboxed; no
 OS-enforced filesystem/network isolation is provided. Specialist reports are
 freeform text in a status envelope. Model routing, persistent/resumable
-conversations, compaction, dollar budgets, a benchmark runner, and calibrated
+conversations, semantic compaction, dollar budgets, a benchmark runner, and calibrated
 guardrail thresholds remain future work. No savings have been demonstrated.
+
+The runtime now prunes older read-only tool output into explicitly marked
+excerpts under context pressure. It preserves instructions, native assistant
+history, call/result pairs, and mutation outcomes without an extra model call;
+this is not semantic summarization or resumable conversation storage.
 
 See [README.md](README.md) for setup, actual behavior, data-sharing implications,
 and current limitations. The stages and release gates below remain the roadmap.

@@ -27,6 +27,38 @@ test("main agent reads files, receives mandatory skills, and records usage witho
   assert.ok(!JSON.stringify(events).includes("private source content"));
 });
 
+test("multi-file investigations continue within the original context limit and log only pruning metadata", async (t) => {
+  const project = await fixture(t);
+  project.config.limits.maxContextChars = 24_000;
+  const content = "CONTEXT_PRIVATE_CONTENT\n".repeat(600);
+  for (const file of ["one.txt", "two.txt", "three.txt"]) {
+    await writeFile(path.join(project.workspace.root, file), content);
+  }
+  const events: { event: string; data: Record<string, unknown> }[] = [];
+  const model = scripted([
+    call("read_file", { path: "one.txt", lineCount: 500 }),
+    call("read_file", { path: "two.txt", lineCount: 500 }),
+    call("read_file", { path: "three.txt", lineCount: 500 }),
+    final("Architecture explained from the inspected files."),
+  ], (messages, tools, index) => {
+    assert.ok(JSON.stringify({ messages, tools }).length <= 24_000);
+    assert.match(messages[0]!.content!, /# Coding/);
+    if (index === 3) {
+      const results = messages.filter((message) => message.role === "tool").map((message) => JSON.parse(message.content!));
+      assert.equal(results.length, 3);
+      assert.ok(results.some((result) => result.contextPruned === true));
+      assert.ok(results.every((result) => result.sha256 === digest(content)));
+      assert.equal(results.at(-1).contextPruned, undefined);
+    }
+  });
+  const result = await run(project, options(model, { emit: (event, data) => events.push({ event, data: data ?? {} }) }));
+  assert.equal(result.status, "completed", result.text);
+  assert.equal(result.metrics.turns, 4);
+  assert.equal(result.metrics.toolCalls, 3);
+  assert.ok(events.some(({ event }) => event === "context_pruned"));
+  assert.ok(!JSON.stringify(events).includes("CONTEXT_PRIVATE_CONTENT"));
+});
+
 test("mutations require approval and fail closed when denied", async (t) => {
   const project = await fixture(t);
   let approvals = 0;

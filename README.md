@@ -323,6 +323,17 @@ limits across the main agent, specialist, and Jev requests. Ctrl-C cancels activ
 work. Approval waiting counts toward the wall-clock deadline and is also measured
 separately.
 
+When context exceeds 75% of `maxContextChars`, the harness shortens older
+read-only results toward a 50% target, retaining small excerpts and file hashes.
+The newest batch stays intact unless it alone cannot fit with the retained
+history. Shortened results explicitly mark `contextPruned` and `truncated`;
+missing content must be reread with targeted line ranges if needed. System and
+user instructions, assistant/native reasoning history, call/result pairs,
+mutation/command outcomes, and errors are not pruned. This is deterministic
+excerpting, not an LLM-generated summary, and adds no model requests.
+`context_pruned` events contain only sizes and counts, never file contents.
+The hard limit still applies if the retained context cannot fit.
+
 Token limits are checked after each response, so they can overshoot by one
 in-flight request. `maxOutputTokens` is forwarded where the provider supports it;
 the pinned Codex subscription adapter does not enforce this output-token cap.
@@ -354,9 +365,10 @@ persist task bodies, file contents, tool arguments/results, or final answers.
 Error messages can include file paths. Logs have no automatic retention policy;
 delete specific old log files according to your requirements.
 
-The MVP has no transcript persistence, resume, streaming UI, automatic context
-compaction, runtime model routing, or benchmark runner. It stops explicitly at
-context limits instead of silently summarizing or discarding evidence.
+The MVP has no transcript persistence, resume, streaming UI, semantic context
+summarization, runtime model routing, or benchmark runner. Read-only output
+pruning is explicit and bounded; irreducible context still stops at the configured
+limit rather than silently dropping instructions or mutation outcomes.
 
 ## Development
 
