@@ -9,22 +9,23 @@ export function terminalSafe(text: string): string {
 export async function loginPrompt(message: string, hidden: boolean, signal: AbortSignal): Promise<string> {
   signal.throwIfAborted();
   if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("Account login requires an interactive terminal");
-  process.stderr.write(terminalSafe(`${message} `));
-  const output = new Writable({
-    write(chunk: Buffer, _encoding, callback) {
-      if (!hidden) process.stderr.write(chunk);
+  const mutedOutput = hidden ? new Writable({
+    write(_chunk: Buffer, _encoding, callback) {
       callback();
     },
-  });
-  const readline = createInterface({ input: process.stdin, output, terminal: true });
+  }) : undefined;
+  const readline = createInterface({ input: process.stdin, output: mutedOutput ?? process.stderr, terminal: true });
   const cancelled = new AbortController();
   readline.on("SIGINT", () => cancelled.abort(new Error("Login cancelled")));
   readline.on("close", () => cancelled.abort(new Error("Login input closed")));
   try {
-    return await readline.question("", { signal: AbortSignal.any([signal, cancelled.signal]) });
+    if (hidden) process.stderr.write(terminalSafe(`${message}\n`));
+    return await readline.question(hidden ? "" : terminalSafe(`${message} `), {
+      signal: AbortSignal.any([signal, cancelled.signal]),
+    });
   } finally {
     readline.close();
-    output.end();
+    mutedOutput?.end();
     if (hidden) process.stderr.write("\n");
   }
 }

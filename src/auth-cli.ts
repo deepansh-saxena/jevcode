@@ -15,12 +15,15 @@ export async function loginAccount(root: string, provider: AccountProvider, requ
   process.on("SIGINT", abort);
   try {
     if (provider === "github-copilot") {
-      const answer = await loginPrompt(
-        "Pi's Copilot login requests enabling its supported models, including third-party models, on your account. Continue? [yes/no]",
-        false, signal,
+      process.stderr.write(
+        "GitHub Copilot sign-in\n\n" +
+        "Pi's login adapter requests enabling its supported models,\n" +
+        "including third-party models, on your Copilot account.\n\n",
       );
+      const answer = await loginPrompt("Continue? [yes/no]", false, signal);
       if (answer.trim().toLowerCase() !== "yes") throw new Error("Copilot login cancelled; no account changes were requested");
     }
+    process.stderr.write(`Starting ${loginAlias(provider)} sign-in...\n`);
     await defaultAuthManager().login(provider, {
       onAuth(info) {
         const instructions = provider === "openai-codex" ?

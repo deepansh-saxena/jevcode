@@ -112,6 +112,10 @@ login uses a loopback callback on port 1455 and supports pasting the full callba
 URL as a fallback. Paste input is hidden. Login has a ten-minute deadline and
 Ctrl-C terminates its isolated authentication worker.
 
+For Copilot, type `yes` and press Enter at `Continue? [yes/no]`. At the GitHub
+Enterprise domain question, press Enter without typing anything for a normal
+github.com account. The CLI then displays the device login URL and code.
+
 ### Credential storage
 
 Credentials are stored in private files under `~/.jev-code/auth/`, separate from
