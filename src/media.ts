@@ -61,7 +61,7 @@ export function requireImageSupport(model: CodingModel, modelId: string, images:
   if (!model.supportsImages?.(modelId)) throw new Error("This model has no verified image-input capability; choose a supported vision model");
 }
 
-// Image token costs depend on provider resizing; reserve 4096 estimated tokens per image instead of counting base64.
+// This is only a context-sizing heuristic, not a token or dollar reservation; provider vision costs are unknown.
 export function contextMessages(messages: Message[]): unknown[] {
   return messages.map(({ images, ...message }) => images?.length ?
     { ...message, images: images.map((image) => ({ mimeType: image.mimeType, estimatedImageBudget: " ".repeat(16_384) })) } : message);

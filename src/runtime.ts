@@ -17,7 +17,7 @@ import { extensionsAllowed, type ExtensionHost } from "./extensions.js";
 import { skillResource } from "./skill-catalog.js";
 import { requireImageSupport, type ImageAttachment } from "./media.js";
 import { ExecutionSession } from "./lifecycle.js";
-import { RunBudget } from "./budget.js";
+import { reserveModelRequest, RunBudget } from "./budget.js";
 
 export const RUNTIME_POLICY_VERSION = "5";
 
@@ -104,11 +104,13 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
   const specialistTaskIds = new Set<string>();
   const initialTaskIds = new Set(session.tasks.list().map((task) => task.id));
   const timer = setTimeout(() => deadline.abort(new LimitError("Run deadline reached")), project.config.limits.maxDurationMs);
-  const signal = AbortSignal.any([options.signal, deadline.signal, session.signal]);
+  const externalSignal = AbortSignal.any([options.signal, deadline.signal, ...(options.session ? [session.signal] : [])]);
+  const signal = AbortSignal.any([externalSignal, session.signal]);
   let route: Route = { skillIds: options.skills ?? [], specialistId: options.specialistId ?? null };
   let mainMessages: Message[] | undefined;
   let specialistRuns = 0;
-  const permissions = options.planMode ? { write: false, commands: false, execution: false, external: false } : options.permissions;
+  const permissions = options.planMode || options.background ?
+    { write: false, commands: false, execution: false, external: false } : options.permissions;
   const totalTokens = (): number => metrics.llm.inputTokens + metrics.llm.outputTokens +
     metrics.jev.inputTokens + metrics.jev.outputTokens;
   const check = (agentSignal = signal): void => {
@@ -122,16 +124,30 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
     metrics[source].outputTokens += usage.outputTokens;
     emit("usage", { source, ...usage });
   };
-  const settleWork = async (): Promise<void> => {
+  let cleanup: Promise<string | undefined> | undefined;
+  const settleWork = (): Promise<string | undefined> => cleanup ??= (async () => {
     specialistLifetime.abort(new Error("Parent run ended"));
-    await Promise.all([...specialistTaskIds].map((id) => session.tasks.stop(id)));
-    if (!options.session) await session.close();
-    else if (signal.aborted) {
-      await Promise.all(session.tasks.list().filter((task) => !initialTaskIds.has(task.id)).map((task) => session.tasks.stop(task.id)));
+    const taskIds = new Set([...specialistTaskIds, ...(options.session && signal.aborted ?
+      session.tasks.list().filter((task) => !initialTaskIds.has(task.id)).map((task) => task.id) : [])]);
+    const results = await Promise.allSettled([
+      ...[...taskIds].map((id) => session.tasks.stop(id)),
+      ...(!options.session ? [session.close()] : []),
+    ]);
+    if (options.session && externalSignal.aborted) {
+      results.push(...await Promise.allSettled(session.tasks.list().filter((task) => !initialTaskIds.has(task.id))
+        .map((task) => session.tasks.stop(task.id))));
+    }
+    if (externalSignal.aborted && options.extensions) {
+      results.push(...await Promise.allSettled([options.extensions.cancel()]));
     }
     metrics.costUsd = budget.costUsd;
     metrics.reportedCostUsd = budget.reportedCostUsd;
-  };
+    const failures = results.filter((result) => result.status === "rejected").map((result) => errorMessage(result.reason));
+    if (!failures.length) return undefined;
+    const reason = `Run cleanup failed: ${failures.join("; ")}`;
+    emit("cleanup_error", { reason });
+    return reason;
+  })();
   try {
     if (!options.task.trim()) throw new Error("Task must not be empty");
     if (options.extensions && !extensionsAllowed({ permissions, planMode: options.planMode, background: options.background })) {
@@ -184,11 +200,13 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
       return target;
     };
     const delegationInput = z.object({ specialistId: idSchema, task: z.string().min(1).max(12_000) }).strict();
-    const startSpecialists = (requests: z.infer<typeof delegationInput>[]): ReturnType<typeof session.tasks.start>[] => {
+    const startSpecialists = async (requests: z.infer<typeof delegationInput>[]): Promise<ReturnType<typeof session.tasks.start>[]> => {
       const targets = requests.map((request) => findSpecialist(request.specialistId));
       if (targets.some((target) => target.tools.some((tool) => !readOnlyNames.has(tool)))) {
         throw new BlockedError("Only specialists with exclusively static read-only file tools may run concurrently; use sequential delegate_task for mutating specialists");
       }
+      for (const target of targets) await loadSkills(project, target.skills, { source: "model", eagerResources: true });
+      check();
       if (specialistRuns + requests.length > project.config.limits.maxSpecialistRuns) throw new LimitError("Specialist run budget reached");
       if (requests.length + session.tasks.list().filter((task) => task.kind === "specialist" && task.status === "running").length >
           project.config.execution.maxParallelSpecialists) throw new LimitError("Concurrent specialist limit reached");
@@ -228,8 +246,8 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
         (!readOnly || readOnlyNames.has(tool.name))) :
         [...available, ...(options.dynamicCapabilities === false ? [] : capabilityTools(project, permissions.write))];
       const extensionContext = { permissions, planMode: options.planMode, background: options.background, specialist: Boolean(specialist) };
-      tools.push(...(options.extensions?.tools(extensionContext) ?? []));
-      if (!specialist && options.askUser) {
+      if (extensionsAllowed(extensionContext)) tools.push(...(options.extensions?.tools(extensionContext) ?? []));
+      if (!specialist && !options.background && options.askUser) {
         const schema = z.object({ question: z.string().min(1).max(2_000),
           choices: z.array(z.string().min(1).max(200)).min(1).max(12).optional() }).strict();
         tools.push({
@@ -244,7 +262,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
           },
         });
       }
-      if (!specialist && options.dynamicCapabilities !== false) {
+      if (!specialist && !options.background && options.dynamicCapabilities !== false) {
         if (project.config.jev.routeSkills !== false) tools.push({
           name: "load_skill", description: "Load an installed skill into this task's instructions, without granting permissions. Use list_capabilities to find IDs.",
           schema: z.object({ skillId: idSchema }).strict(),
@@ -286,7 +304,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
             return { name: "delegate_task", mutating: false, details: args, async execute() {
               if (args.background) {
                 if (options.backgroundSpecialists === false) throw new BlockedError("Background specialists are disabled");
-                return startSpecialists([{ specialistId: args.specialistId, task: args.task }])[0];
+                return (await startSpecialists([{ specialistId: args.specialistId, task: args.task }]))[0];
               }
               if (session.tasks.list().some((task) => task.kind === "specialist" && task.status === "running") &&
                 target.tools.some((tool) => !readOnlyNames.has(tool))) {
@@ -304,7 +322,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
           async prepare(input) {
             const args = z.object({ tasks: z.array(delegationInput).min(1).max(8), background: z.boolean().default(false) }).strict().parse(input);
             return { name: "delegate_parallel", mutating: false, details: args, async execute(signal) {
-              const tasks = startSpecialists(args.tasks);
+              const tasks = await startSpecialists(args.tasks);
               return args.background ? tasks : Promise.all(tasks.map((task) => session.tasks.wait(task.id, signal)));
             } };
           },
@@ -344,9 +362,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
           throw new LimitError(`Context size limit reached (${contextChars}/${project.config.limits.maxContextChars} characters after pruning read-only results)`);
         }
         const modelId = specialist?.model ?? project.config.llm.model;
-        const inputUpper = Math.max(Buffer.byteLength(JSON.stringify({ messages, tools: specs })),
-          model.contextSize ? 3 * model.contextSize(messages, specs) : 0) + 4096;
-        const reservation = agentBudget.reserve("llm", modelId, inputUpper, project.config.llm.maxOutputTokens);
+        const reservation = reserveModelRequest(agentBudget, model, modelId, messages, specs, project.config.llm.maxOutputTokens);
         turns++;
         metrics.turns = budget.turns;
         const requestStarted = performance.now();
@@ -446,21 +462,24 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
       report = JSON.stringify({ specialist: specialist.id, ...result });
     }
     const result = await agent(undefined, report);
-    await settleWork();
+    const cleanupError = await settleWork();
+    externalSignal.throwIfAborted();
     metrics.durationMs = Math.round(performance.now() - started);
-    emit("run_completed", { status: result.status, metrics });
-    return { status: result.status, text: result.text, route, metrics };
+    const status = cleanupError ? "failed" : result.status;
+    const text = cleanupError ? `${result.text}\n\n${cleanupError}` : result.text;
+    emit("run_completed", { status, ...(cleanupError ? { reason: cleanupError } : {}), metrics });
+    return { status, text, route, metrics };
   } catch (error) {
-    const actual = signal.aborted ? signal.reason : error;
-    const status: RunResult["status"] = actual instanceof LimitError ? "limited" :
-      signal.aborted ? "cancelled" : actual instanceof BlockedError ? "blocked" : "failed";
-    await settleWork();
+    const actual = externalSignal.aborted ? externalSignal.reason : error;
+    let status: RunResult["status"] = actual instanceof LimitError ? "limited" :
+      externalSignal.aborted ? "cancelled" : actual instanceof BlockedError ? "blocked" : "failed";
+    const cleanupError = await settleWork();
+    if (cleanupError) status = "failed";
     metrics.durationMs = Math.round(performance.now() - started);
-    const text = errorMessage(actual);
+    const text = `${errorMessage(actual)}${cleanupError ? `\n\n${cleanupError}` : ""}`;
     emit("run_completed", { status, reason: text, metrics });
     return { status, text, route, metrics };
   } finally {
-    if (signal.aborted) await options.extensions?.cancel();
     await settleWork();
     if (mainMessages) {
       const pending = new Map<string, string>();

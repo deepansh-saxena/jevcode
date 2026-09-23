@@ -57,6 +57,10 @@ keep a job alive. Session close aborts and awaits all tasks; SIGTERM/SIGHUP
 handlers close owned sessions when the embedding process has no handler of its
 own. Process exit also synchronously kills active local process groups.
 Embedders that own signal handling must await `session.close()`.
+If an embedding handler is registered after the session, the fallback closes
+owned tasks but leaves process termination to that handler so extension cleanup
+can finish. Cleanup failures are reported before `run_completed`; pending tool
+history and deadline cleanup still finish even when an extension refuses to close.
 
 ```ts
 const session = new ExecutionSession(project.workspace, project.config);
@@ -239,6 +243,13 @@ a configured reported-token estimate, not an assertion about actual billing.
 Requests reserve serialized input bytes plus framing allowance (provider-native
 context uses a conservative UTF-8 bound), and configured maximum output tokens.
 Reservations may stop earlier than actual token usage would require.
+Image payload base64 is not counted as text tokens. No verified model-specific
+vision token bound is currently available, so capped image requests fail
+explicitly before sending, including images retained in conversation history.
+Uncapped image requests reserve their scope's entire remaining token allowance
+and reconcile actual reported usage afterward; they do not use an invented
+fixed image-token cost. The UI's image context-sizing heuristic is separate
+from this reservation and does not establish a price or provider token bound.
 **This is not a hard provider billing guarantee:** Jev currently has no enforced
 output ceiling, tokenizers/framing/provider usage can exceed reservations, and
 requests already in flight can report an overshoot. An observed overrun records
@@ -252,3 +263,6 @@ outputUpper)`, returning `settle(usage)` / `fail()`. Pass the same budget into
 `RunOptions.budget` for pre-run compaction. Runtime cost and turn metrics include
 that injected budget's whole lifetime; runtime token metrics describe runtime
 requests only, so the embedding UI must avoid double-counting pre-run metrics.
+Use the exported `reserveModelRequest(budget, model, modelId, messages, tools,
+maxOutputTokens)` helper for coding/compaction requests so both text and image
+requests follow the same policy and native assistant-history identity is retained.

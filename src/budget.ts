@@ -1,6 +1,8 @@
 import type { Config } from "./config.js";
 import { LimitError } from "./errors.js";
 import type { Usage } from "./http.js";
+import type { CodingModel, Message, ToolSpec } from "./llm.js";
+import { requireImageSupport } from "./media.js";
 
 export interface Reservation { settle(usage: Usage): void; fail(): void }
 interface Ledger { cost: number; unknown: boolean; incomplete: number; turns: number }
@@ -32,6 +34,15 @@ export class RunBudget {
       limits: value.limits, spend: value.spend, provider: value.llm.provider,
     });
     if (policy(config) !== policy(this.config)) throw new LimitError("Injected budget does not match the current run policy");
+  }
+
+  reserveImageRequest(model: string, textInputUpper: number, outputUpper: number): Reservation {
+    if (this.#usd !== undefined) {
+      throw new LimitError("Image input token bounds are unknown for this provider/model; a reported-dollar cap cannot safely admit this request");
+    }
+    const inputAllowance = this.#tokens - outputUpper;
+    if (inputAllowance < textInputUpper) throw new LimitError("Shared token budget cannot reserve this image request and its text context");
+    return this.reserve("llm", model, inputAllowance, outputUpper);
   }
 
   allocate(turnLimits: number[]): RunBudget[] {
@@ -114,4 +125,20 @@ export class RunBudget {
     this.parent.#turns += this.#turns;
     if (this.parent.#usd !== undefined && this.#usd !== undefined) this.parent.#usd += this.#usd;
   }
+}
+
+export function reserveModelRequest(budget: RunBudget, model: CodingModel, modelId: string,
+  messages: Message[], tools: ToolSpec[], maxOutputTokens: number): Reservation {
+  let hasImages = false;
+  const textMessages = messages.map((message): Message => {
+    if (!message.images?.length) return message;
+    requireImageSupport(model, modelId, message.images);
+    hasImages = true;
+    const { images: _images, ...text } = message;
+    return text;
+  });
+  const textInputUpper = Math.max(Buffer.byteLength(JSON.stringify({ messages: textMessages, tools })),
+    model.contextSize ? 3 * model.contextSize(textMessages, tools) : 0) + 4096;
+  return hasImages ? budget.reserveImageRequest(modelId, textInputUpper, maxOutputTokens) :
+    budget.reserve("llm", modelId, textInputUpper, maxOutputTokens);
 }

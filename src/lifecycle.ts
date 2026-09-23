@@ -15,9 +15,14 @@ function registerSession(session: ExecutionSession): () => void {
   for (const [signal, exitCode] of [["SIGTERM", 143], ["SIGHUP", 129]] as const) {
     if (terminationHandlers.has(signal) || process.listenerCount(signal)) continue;
     const handler = (): void => {
+      // once() removed this fallback before invocation; any remaining listener belongs to the embedding application.
+      const embeddingOwnsExit = process.listenerCount(signal) > 0;
       void Promise.all([...activeSessions].map((active) => active.close())).then(
-        () => process.exit(exitCode),
-        (error: unknown) => { process.stderr.write(`Execution cleanup failed: ${String(error)}\n`); process.exit(exitCode); },
+        () => { if (!embeddingOwnsExit) process.exit(exitCode); },
+        (error: unknown) => {
+          process.stderr.write(`Execution cleanup failed: ${String(error)}\n`);
+          if (!embeddingOwnsExit) process.exit(exitCode);
+        },
       );
     };
     terminationHandlers.set(signal, handler);
