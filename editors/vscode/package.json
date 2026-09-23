@@ -1,0 +1,33 @@
+{
+  "name": "jevcode-local",
+  "displayName": "Jev Code Local",
+  "description": "Local Jev Code stdio client with explicit per-action approvals.",
+  "version": "0.1.0",
+  "publisher": "jevcode",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": { "vscode": "^1.90.0" },
+  "main": "./extension.cjs",
+  "activationEvents": ["onCommand:jevcode.open", "onCommand:jevcode.selection", "onCommand:jevcode.cancel"],
+  "capabilities": { "untrustedWorkspaces": { "supported": false } },
+  "contributes": {
+    "commands": [
+      { "command": "jevcode.open", "title": "Jev Code: Open Local Chat" },
+      { "command": "jevcode.selection", "title": "Jev Code: Send Selection" },
+      { "command": "jevcode.cancel", "title": "Jev Code: Cancel Current Turn" }
+    ],
+    "configuration": {
+      "title": "Jev Code",
+      "properties": {
+        "jevcode.executable": {
+          "type": "string", "default": "", "scope": "machine",
+          "description": "Absolute path to the installed jevcode executable, or to Node with arguments pointing at the built CLI."
+        },
+        "jevcode.arguments": {
+          "type": "array", "items": { "type": "string" }, "default": [], "scope": "machine",
+          "description": "Explicit executable arguments, e.g. [\"/absolute/jev-code/dist/cli.js\"] when executable is Node. No shell expansion."
+        }
+      }
+    }
+  }
+}

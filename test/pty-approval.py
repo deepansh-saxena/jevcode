@@ -51,6 +51,10 @@ try:
             # Wait for redraws to settle before responding to a visible prompt.
             visible_tail = output[answered_at:].rsplit(b"\x1b[0J", 1)[-1]
             if answered < len(prompts) and prompts[answered][0] in visible_tail:
+                if answered == 0 and "JEV_PTY_RESIZE" in os.environ:
+                    rows, columns = json.loads(os.environ["JEV_PTY_RESIZE"])
+                    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+                    os.kill(child.pid, signal.SIGWINCH)
                 os.write(master, prompts[answered][1])
                 answered += 1
                 answered_at = len(output)

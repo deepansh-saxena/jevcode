@@ -1,117 +1,97 @@
-import { createInterface } from "node:readline/promises";
 import type { Project } from "./registry.js";
 import { createCodingModel } from "./llm.js";
-import { run, type RunOptions } from "./runtime.js";
-import { createEventLog } from "./events.js";
+import type { RunOptions } from "./runtime.js";
 import { errorMessage } from "./errors.js";
-import { terminalSafe } from "./terminal.js";
-import { restoreSession } from "./session.js";
-import { commandCompletions, handleChatCommand, newChatMetrics, recordRun, type ChatState } from "./chat-commands.js";
+import { latestSession, restoreSession } from "./session.js";
+import { newChatMetrics, type ChatState } from "./chat-commands.js";
+import { ChatController, type ChatServices } from "./chat-controller.js";
+import { fullscreenTerminal, PlainTerminal } from "./chat-terminal.js";
+import { composeInEditor } from "./chat-files.js";
+
+export interface ChatOptions {
+  fullscreen?: boolean;
+  continue?: boolean;
+  images?: string[];
+  autoCompact?: boolean;
+  services?: ChatServices;
+}
 
 export async function chat(project: Project, settings: Pick<RunOptions, "permissions" | "skills" | "specialistId">,
-  resume?: string, planMode = false): Promise<void> {
-  if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("Chat requires an interactive terminal; use jevcode run for scripts");
+  resume?: string, planMode = false, options: ChatOptions = {}): Promise<void> {
+  if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("Chat requires an interactive terminal; use jevcode run or serve for scripts");
   const model = await createCodingModel(project.config.llm, process.env, AbortSignal.timeout(project.config.llm.timeoutMs));
-  const state: ChatState = { project, model, messages: resume ? await restoreSession(project, resume, model) : [],
-    settings, planMode, runs: 0, compactions: 0, metrics: newChatMetrics() };
-  const readline = createInterface({ input: process.stdin, output: process.stderr, terminal: true,
-    completer: (line: string) => commandCompletions(project, line) });
+  const sessionId = resume ?? (options.continue ? await latestSession(project) : undefined);
+  const state: ChatState = { project, model, messages: sessionId ? await restoreSession(project, sessionId, model) : [],
+    settings, planMode, runs: 0, compactions: 0, metrics: newChatMetrics(), autoCompact: options.autoCompact ?? false };
+  const app = new ChatController(state, options.services);
+  const terminal = options.fullscreen ? await fullscreenTerminal(project) : new PlainTerminal(project);
   let controller: AbortController | undefined;
   let closed = false;
-  const queued: string[] = [];
-  let waiting: ((line: string | null) => void) | undefined;
-  let approving = false;
-  readline.on("line", (line) => {
-    if (waiting) {
-      const resolve = waiting;
-      waiting = undefined;
-      resolve(line);
-    } else if (!approving) {
-      queued.push(line);
-      process.stderr.write("\n[message queued; Ctrl-C cancels the current turn]\n");
-    }
-  });
-  readline.on("close", () => {
-    closed = true;
-    controller?.abort(new Error("Terminal input closed"));
-    waiting?.(null);
-    waiting = undefined;
-  });
-  readline.on("SIGINT", () => {
-    if (controller) {
-      controller.abort(new Error("Cancelled by user"));
-      waiting?.(null);
-      waiting = undefined;
-    } else readline.close();
-  });
-  const input = (prompt: string): Promise<string | null> => {
-    if (closed) return Promise.resolve(null);
-    readline.setPrompt(prompt);
-    readline.prompt();
-    return new Promise((resolve) => { waiting = resolve; });
+  terminal.onCancel = () => {
+    if (controller) controller.abort(new Error("Cancelled by user"));
+    else { closed = true; terminal.close(); }
   };
-  const confirm = async (prompt: string): Promise<boolean> => {
-    controller?.signal.throwIfAborted();
-    approving = true;
-    try {
-      const answer = await input(prompt);
-      return !closed && !controller?.signal.aborted && answer?.trim().toLowerCase() === "yes";
-    } finally { approving = false; }
-  };
-  process.stderr.write(terminalSafe(`Jev Code | ${project.config.llm.provider}/${project.config.llm.model} | Jev ${project.config.jev.mode}\n`));
-  process.stderr.write("Chat keeps context in memory. Type /help for commands. Ctrl-C cancels a turn; at the prompt it exits.\n");
-  process.stderr.write("Use /permissions to enable edits, /skills or /agents to create capabilities. Tab completes slash commands.\n");
-  process.stderr.write("Writes and commands still require exact-action approval. Messages typed while busy are queued.\n");
-  if (state.planMode) process.stderr.write("Plan mode: read-only investigation and planning; no edits or commands.\n");
+  const abort = (): void => { closed = true; controller?.abort(new Error("Terminal terminated")); terminal.close(); };
+  process.on("SIGTERM", abort);
+  process.on("SIGHUP", abort);
+  terminal.write(`Jev Code | ${project.config.llm.provider}/${project.config.llm.model} | Jev ${project.config.jev.mode}\n`);
+  terminal.write("Context stays in memory; /save explicitly persists it. /help lists commands. Ctrl-C cancels a turn or exits.\n");
+  terminal.write(options.fullscreen ? "Enter inserts a newline; Ctrl-S submits. Tab completes commands.\n" :
+    "Tab completes commands. /paste starts multiline input; /end submits it. --fullscreen opens the visual interface.\n");
+  terminal.write("Each mutation needs fresh exact-action approval. Busy input is queued, never treated as approval.\n");
+  if (state.planMode) terminal.write("Plan mode: read-only investigation and planning; no edits or commands.\n");
+  const startup = (options.images ?? []).map((image) => `/attach ${image}`);
   try {
     while (!closed) {
-      const line = queued.length ? queued.shift()! : await input("jevcode> ");
+      const line = startup.shift() ?? await terminal.read("jevcode> ");
       if (line === null) break;
-      const task = line.trim();
-      if (!task) continue;
+      if (!line.trim()) continue;
+      controller = new AbortController();
+      const signal = controller.signal;
+      let liveInput = 0;
+      let liveOutput = 0;
+      const activity = (text: string): void => terminal.status(options.fullscreen ?
+        `${project.config.llm.model} | ${state.planMode ? "plan" : "chat"} | ${liveInput} in / ${liveOutput} out | ${text}` : text);
       try {
-        controller = new AbortController();
-        const command = await handleChatCommand(task, state, {
-          write: (text) => process.stdout.write(terminalSafe(text)), confirm, signal: controller.signal,
+        const result = await app.submit(line.trim(), {
+          signal, write: (text) => terminal.write(text),
+          confirm: async (prompt, requestSignal = signal) => {
+            const answer = await terminal.read(prompt, true, requestSignal);
+            return !requestSignal.aborted && answer?.trim().toLowerCase() === "yes";
+          },
+          askUser: async (question, requestSignal) => {
+            const answer = await terminal.read(`${question.question}\n${question.choices?.map((choice, index) => `${index + 1}. ${choice}`).join("\n") ?? ""}\nAnswer: `,
+              true, requestSignal);
+            requestSignal.throwIfAborted();
+            if (!answer?.trim()) throw new Error("Clarification dismissed without an answer");
+            return answer.trim();
+          },
+          editor: () => composeInEditor(signal, (work) => terminal.suspend(work)),
+          event(event, data = {}) {
+            if (event === "usage") {
+              liveInput += typeof data.inputTokens === "number" ? data.inputTokens : 0;
+              liveOutput += typeof data.outputTokens === "number" ? data.outputTokens : 0;
+              if (options.fullscreen) activity("working");
+            } else if (event === "llm_request") activity(`thinking: ${String(data.role)}`);
+            else if (event === "turn_finished") {
+              activity(String(data.status));
+              terminal.write(`${state.metrics.llm.inputTokens} input / ${state.metrics.llm.outputTokens} output tokens; log: ${String(data.eventLog)}\n`);
+            } else if (["routing", "tool_started", "tool_error", "routing_fallback", "context_pruned",
+              "auto_compaction_started", "auto_compaction_completed", "task_started"].includes(event)) {
+              activity(`${event}: ${JSON.stringify(event === "routing" ? data.effective ?? data : data)}`);
+            }
+          },
         });
-        if (command.kind === "exit") break;
-        if (command.kind === "handled") continue;
-        let streamed = false;
-        const log = await createEventLog(project.workspace.root, (event, data = {}) => {
-          if (["tool_started", "tool_error", "routing_fallback", "context_pruned", "specialist_limit", "specialist_report_invalid", "guardrail_shadow", "skill_loaded", "specialist_delegated"].includes(event)) {
-            process.stderr.write(terminalSafe(`\n[${event}] ${JSON.stringify(data)}\n`));
-          } else if (event === "routing") {
-            process.stderr.write(terminalSafe(`\n[routing] ${JSON.stringify(data.effective ?? {
-              skillIds: data.skillIds, specialistId: data.specialistId,
-            })}\n`));
-          } else if (event === "llm_request") process.stderr.write(`\n[thinking: ${String(data.role)}]\n`);
-        });
-        try {
-          const result = await run(project, {
-            ...state.settings, task: command.task, model: state.model, conversation: state.messages,
-            planMode: state.planMode, signal: controller.signal, emit: log.emit,
-            ...(command.skills ? { skills: command.skills } : {}),
-            ...(command.specialistId ? { specialistId: command.specialistId } : {}),
-            ...(command.readOnly ? { permissions: { write: false, commands: false } } : {}),
-            onText(text) { streamed = true; process.stdout.write(terminalSafe(text)); },
-            async approve(action, signal) {
-              signal.throwIfAborted();
-              process.stderr.write(terminalSafe(`\nApprove ${action.name}?\n${JSON.stringify(action.details, null, 2)}\n`));
-              const cancel = (): void => { waiting?.(null); waiting = undefined; };
-              signal.addEventListener("abort", cancel, { once: true });
-              try {
-                return await confirm("Type yes to execute this exact action: ") && !signal.aborted;
-              } finally { signal.removeEventListener("abort", cancel); }
-            },
-          });
-          recordRun(state, result);
-          if (!streamed || result.status !== "completed") process.stdout.write(terminalSafe(`\n${result.text}`));
-          process.stdout.write("\n");
-          process.stderr.write(`[${result.status}] ${result.metrics.durationMs}ms; ${result.metrics.turns} turns; log: ${log.path}\n`);
-        } finally { log.close(); }
+        if (result.kind === "exit") break;
       } catch (error) {
-        process.stderr.write(terminalSafe(`Error: ${errorMessage(error)}\n`));
+        terminal.write(`Error: ${errorMessage(error)}\n`);
       } finally { controller = undefined; }
     }
-  } finally { readline.close(); }
+  } finally {
+    closed = true;
+    process.removeListener("SIGTERM", abort);
+    process.removeListener("SIGHUP", abort);
+    terminal.close();
+    await app.close();
+  }
 }

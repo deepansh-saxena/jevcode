@@ -213,3 +213,107 @@ test("queued slash commands and queued yes cannot elevate permissions", { skip }
   assert.equal(requests, 2);
   assert.match(result.stdout, /Permissions unchanged/);
 });
+
+test("full-screen multiline editor submits with Ctrl-S, sanitizes model escapes, and restores the terminal", { skip }, async (t) => {
+  const project = await fixture(t);
+  let requests = 0;
+  const url = await server(t, (request, response) => {
+    void requestBody(request).then((body) => {
+      requests++;
+      const messages = body.messages as { content: string }[];
+      assert.equal(messages.at(-1)!.content, "Line one\nLine two");
+      response.end(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "SCREEN_RESPONSE \u001b]52;c;POISON\u0007" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 2, completion_tokens: 2 },
+      }));
+    });
+  });
+  project.config.llm.baseUrl = url;
+  await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
+  const result = await exec("/usr/bin/python3", [
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--fullscreen",
+  ], { env: { ...process.env, TERM: "xterm-256color", OPENAI_API_KEY: "fake", HOME: project.workspace.root,
+    JEV_PTY_RESIZE: "[30,100]",
+    JEV_PTY_PROMPTS: JSON.stringify([["jevcode>", "Line one\rLine two\u0013"], ["SCREEN_RESPONSE", "\u0003"]]),
+  }, timeout: 20_000 });
+  assert.equal(requests, 1);
+  assert.match(result.stdout, /\u001b\[\?1049h/);
+  assert.match(result.stdout, /\u001b\[\?1049l/);
+  assert.doesNotMatch(result.stdout, /\u001b]52;c;POISON/);
+});
+
+test("partial pretyped yes and a queued Enter cannot approve a new plain-terminal action", { skip }, async (t) => {
+  const project = await fixture(t);
+  const url = await server(t, (request, response) => {
+    void requestBody(request).then(() => setTimeout(() => response.end(JSON.stringify({
+      choices: [{ message: { role: "assistant", content: null, tool_calls: [{
+        id: "write-1", type: "function", function: { name: "write_file",
+          arguments: '{"path":"no.txt","content":"no","expectedHash":null}' },
+      }] }, finish_reason: "tool_calls" }],
+      usage: { prompt_tokens: 2, completion_tokens: 2 },
+    })), 250));
+  });
+  project.config.llm.baseUrl = url;
+  await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
+  const result = await exec("/usr/bin/python3", [
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--write", "--plain",
+  ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
+    JEV_PTY_PROMPTS: JSON.stringify([["jevcode> ", "Write\n"], ["thinking: main", "yes"],
+      ["Type yes to execute this exact action:", "\n"], ["jevcode> ", "/exit\n"]]),
+  }, timeout: 20_000 });
+  assert.match(result.stdout, /\[blocked\]/);
+  await assert.rejects(project.workspace.read("no.txt"), /ENOENT/);
+});
+
+for (const fullscreen of [false, true]) {
+  test(`external editor previews and confirms before sending (${fullscreen ? "full-screen" : "plain"})`, { skip }, async (t) => {
+    const project = await fixture(t);
+    let requests = 0;
+    project.config.llm.baseUrl = await server(t, (request, response) => {
+      void requestBody(request).then((body) => {
+        requests++;
+        assert.equal((body.messages as { content: string }[]).at(-1)!.content, "Editor composed\nmultiline prompt");
+        response.end(JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "EDITOR_ACCEPTED" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 2, completion_tokens: 2 },
+        }));
+      });
+    });
+    await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
+    const submit = fullscreen ? "\u0013" : "\n";
+    const result = await exec("/usr/bin/python3", [
+      path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+      fullscreen ? "--fullscreen" : "--plain",
+    ], { env: { ...process.env, TERM: "xterm-256color", OPENAI_API_KEY: "fake", HOME: project.workspace.root,
+      JEV_EDITOR: process.execPath,
+      JEV_EDITOR_ARGS: JSON.stringify(["--eval", "require('node:fs').writeFileSync(process.argv[1], 'Editor composed\\nmultiline prompt')"]),
+      JEV_PTY_PROMPTS: JSON.stringify([["jevcode>", `/editor${submit}`], [fullscreen ? "yes:" : "Type yes:", `yes${submit}`],
+        fullscreen ? ["EDITOR_ACCEPTED", "\u0003"] : ["jevcode>", "/exit\n"]]),
+    }, timeout: 20_000 }).catch((error: { stdout?: string }) => { t.diagnostic(error.stdout ?? "No terminal output"); throw error; });
+    assert.equal(requests, 1);
+    assert.match(result.stdout, /preview:/);
+    if (fullscreen) assert.match(result.stdout, /\u001b\[\?1049l/);
+  });
+}
+
+test("full-screen queued yes and a fresh empty submit cannot elevate permissions", { skip }, async (t) => {
+  const project = await fixture(t);
+  let requests = 0;
+  project.config.llm.baseUrl = await server(t, (request, response) => {
+    void requestBody(request).then((body) => {
+      requests++;
+      assert.ok(!(body.tools as { function: { name: string } }[]).some((tool) => tool.function.name === "write_file"));
+      response.end(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "QUEUE_SAFE" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 2, completion_tokens: 2 },
+      }));
+    });
+  });
+  await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
+  await exec("/usr/bin/python3", [
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--fullscreen",
+  ], { env: { ...process.env, TERM: "xterm-256color", OPENAI_API_KEY: "fake", HOME: project.workspace.root,
+    JEV_PTY_PROMPTS: JSON.stringify([["jevcode>", "/permissions all\u0013yes\u0013"], ["yes:", "\u0013"], ["QUEUE_SAFE", "\u0003"]]),
+  }, timeout: 20_000 });
+  assert.equal(requests, 1);
+});

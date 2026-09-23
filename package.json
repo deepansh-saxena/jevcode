@@ -17,10 +17,12 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.74.0",
+    "blessed": "0.1.81",
     "typebox": "1.1.24",
     "zod": "4.1.12"
   },
   "devDependencies": {
+    "@types/blessed": "0.1.25",
     "@types/node": "20.19.17",
     "tsx": "4.20.6",
     "typescript": "5.9.3"

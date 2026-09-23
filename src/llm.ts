@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Config } from "./config.js";
 import { postJson, type Usage } from "./http.js";
+import { contextMessages, requireImageSupport, type ImageAttachment } from "./media.js";
 
 export const toolCallSchema = z.object({
   id: z.string().min(1),
@@ -11,6 +12,7 @@ export type ToolCall = z.infer<typeof toolCallSchema>;
 export interface Message {
   role: "system" | "user" | "assistant" | "tool";
   content: string | null;
+  images?: ImageAttachment[];
   tool_calls?: ToolCall[];
   tool_call_id?: string;
 }
@@ -28,6 +30,7 @@ export interface Completion {
   finishReason: string;
 }
 export interface CodingModel {
+  supportsImages?(model: string): boolean;
   complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal, onText?: (text: string) => void): Promise<Completion>;
   contextSize?(messages: Message[], tools: ToolSpec[]): number;
   exportHistory?(messages: Message[]): unknown;
@@ -67,10 +70,27 @@ const responseSchema = z.object({
 export class OpenAICompatible implements CodingModel {
   constructor(private config: Config["llm"], private key: string) {}
 
+  supportsImages(model: string): boolean {
+    return /^(gpt-4o(?:-mini)?|gpt-4\.1(?:-mini|-nano)?|gpt-4-turbo|gpt-5(?:\.\d+)?(?:-mini|-nano)?|o[134])(?:-\d{4}-\d{2}-\d{2})?$/.test(model);
+  }
+
+  contextSize(messages: Message[], tools: ToolSpec[]): number {
+    return JSON.stringify({ messages: contextMessages(messages), tools }).length;
+  }
+
   async complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal, onText?: (text: string) => void): Promise<Completion> {
+    const wireMessages = messages.map(({ images, ...message }) => {
+      if (!images?.length) return message;
+      if (message.role !== "user") throw new Error("Images are only supported in user messages");
+      requireImageSupport(this, model, images);
+      return { ...message, content: [
+        { type: "text", text: message.content ?? "" },
+        ...images.map((image) => ({ type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.data}` } })),
+      ] };
+    });
     const raw = await postJson(`${this.config.baseUrl.replace(/\/$/, "")}/chat/completions`,
       `Bearer ${this.key}`, {
-        model, messages, max_completion_tokens: this.config.maxOutputTokens,
+        model, messages: wireMessages, max_completion_tokens: this.config.maxOutputTokens,
         ...(tools.length ? { tools, tool_choice: "auto", parallel_tool_calls: false } : {}),
       }, signal, this.config.timeoutMs);
     const parsed = responseSchema.safeParse(raw);
