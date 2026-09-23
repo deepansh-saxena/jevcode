@@ -106,6 +106,21 @@ test("runtime blocks model invocation of user-only skills but explicit user sele
   assert.equal(allowed.status, "completed");
 });
 
+test("specialists receive bounded standard skill resources without widening their tool allowlist", async (t) => {
+  const project = await fixture(t);
+  await put(project, ".jev/skills/reference/SKILL.md", "---\nname: reference\ndescription: Project conventions\n---\nFollow the supporting reference.");
+  await put(project, ".jev/skills/reference/guide.md", "Specialist resource convention.");
+  const loaded = await loadProject(project.workspace.root, { globalRoot: null });
+  loaded.specialists[0]!.skills = ["reference"];
+  const result = await run(loaded, options(scripted([final("Report"), final()], (messages, tools, index) => {
+    if (index === 0) {
+      assert.match(messages[0]!.content!, /Specialist resource convention/);
+      assert.equal(tools.some((tool) => tool.function.name === "load_skill_resource"), false);
+    }
+  }), { specialistId: loaded.specialists[0]!.id }));
+  assert.equal(result.status, "completed");
+});
+
 test("Jev intake excludes user-only skills and the slash command supplies arguments without pinning", async (t) => {
   const project = await fixture(t);
   await put(project, ".jev/skills/manual/SKILL.md", "---\nname: manual\ndescription: Do not route me\ndisable-model-invocation: true\n---\nTask $ARGUMENTS.");

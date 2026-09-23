@@ -143,7 +143,8 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
       }
       const role = specialist?.id ?? "main";
       const selectedSkills = new Set([...route.skillIds, ...(specialist?.skills ?? [])]);
-      const invocation = { source: "model" as const, explicitIds: options.skills ?? [], arguments: options.skillArguments };
+      const invocation = { source: "model" as const, explicitIds: options.skills ?? [], arguments: options.skillArguments,
+        eagerResources: Boolean(specialist) };
       let skills = await loadSkills(project, [...selectedSkills], invocation);
       let prompt = systemPrompt(project, skills.text, specialist, options.planMode);
       const tools: Tool[] = specialist ? available.filter((tool) => specialist.tools.some((name) => name === tool.name)) :

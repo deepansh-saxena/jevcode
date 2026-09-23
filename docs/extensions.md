@@ -79,7 +79,9 @@ Standard skill resources are listed progressively, not all inserted into the
 prompt. The main agent can read a declared resource after loading the skill
 using `load_skill_resource`. Scripts are only text: discovery, loading, and
 resource access never execute them. JSON resources retain their existing
-eager loading and shared skill budget. A catalog allows 64 entries; a standard
+eager loading and shared skill budget. Specialists receive resources inline
+under that same skill budget, without widening their static tool allowlist.
+A catalog allows 64 entries; a standard
 skill allows 16 resources, depth 4, 64 directories, and 100 KB per text file.
 Binary resources fail if read. Hidden credential paths, known credential file
 names, symlinks, hard-linked files, and recognizable secret content are rejected.

@@ -68,6 +68,7 @@ export interface SkillInvocation {
   source?: "user" | "model";
   explicitIds?: string[];
   arguments?: Record<string, string> | undefined;
+  eagerResources?: boolean;
 }
 
 export async function loadSkills(project: Project, ids: string[], invocation: SkillInvocation = {}): Promise<{ ids: string[]; text: string }> {
@@ -88,7 +89,7 @@ export async function loadSkills(project: Project, ids: string[], invocation: Sk
       content = content.replace(/\$ARGUMENTS(?:\[(\d+)\])?|\$(\d+)/g, (_match, indexed: string | undefined, numeric: string | undefined) =>
         indexed !== undefined || numeric !== undefined ? words[Number(indexed ?? numeric)] ?? "" : args);
     }
-    const resources = skill.provenance && skill.provenance.format !== "json" ?
+    const resources = skill.provenance && skill.provenance.format !== "json" && !invocation.eagerResources ?
       (skill.resources?.length ? [`Supporting resources (load with load_skill_resource; never automatically executed): ${skill.resources.join(", ")}`] : []) :
       await Promise.all((skill.resources ?? []).map(async (resource) =>
         `Resource ${resource}:\n${await skillResource(skill, project.workspace.root, resource)}`));
