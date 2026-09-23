@@ -6,12 +6,15 @@ import type { Project } from "./registry.js";
 import { readText, resolvePath } from "./workspace.js";
 import { toolCallSchema, type CodingModel, type Message } from "./llm.js";
 import { isMissing } from "./errors.js";
+import { imageSchema, MAX_IMAGES } from "./media.js";
 
 const snapshotSchema = z.object({
   version: z.literal(1), root: z.string(), provider: z.string(), model: z.string(),
+  name: z.string().min(1).max(80).optional(),
   messages: z.array(z.object({
     role: z.enum(["system", "user", "assistant", "tool"]), content: z.string().nullable(),
     tool_calls: z.array(toolCallSchema).optional(), tool_call_id: z.string().optional(),
+    images: z.array(imageSchema).max(MAX_IMAGES).optional(),
   }).strict()).max(2_000),
   native: z.unknown().optional(),
 }).strict();
@@ -30,14 +33,15 @@ async function sessionDirectory(project: Project, create: boolean): Promise<stri
 }
 
 export async function listSessions(project: Project): Promise<{
-  sessions: { id: string; modifiedAt: string; bytes: number }[]; truncated: boolean;
+  sessions: { id: string; modifiedAt: string; bytes: number; name?: string }[]; truncated: boolean;
 }> {
   let directory: string;
   try { directory = await sessionDirectory(project, false); }
   catch (error) { if (isMissing(error)) return { sessions: [], truncated: false }; throw error; }
   const names = (await readdir(directory)).filter((name) => name.endsWith(".json") &&
     z.string().uuid().safeParse(name.slice(0, -5)).success).sort();
-  const sessions = await Promise.all(names.slice(0, 200).map(async (name) => {
+  if (names.length > 2_000) throw new Error("Too many saved sessions to list safely (maximum 2000)");
+  const entries = await Promise.all(names.map(async (name) => {
     const info = await lstat(await resolvePath(project.workspace.root, `.jev/sessions/${name}`));
     if (!info.isFile() || info.nlink !== 1 || (process.platform !== "win32" &&
       ((info.mode & 0o077) !== 0 || info.uid !== process.getuid?.()))) {
@@ -45,16 +49,30 @@ export async function listSessions(project: Project): Promise<{
     }
     return { id: name.slice(0, -5), modifiedAt: info.mtime.toISOString(), bytes: info.size };
   }));
-  sessions.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  entries.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  const sessions: { id: string; modifiedAt: string; bytes: number; name?: string }[] = entries.slice(0, 200);
+  for (const session of sessions) {
+    try {
+      const raw: unknown = JSON.parse(await readText(await resolvePath(project.workspace.root, `.jev/sessions/${session.id}.json`), 8_000_000));
+      const metadata = z.object({ name: z.string().min(1).max(80).optional() }).parse(raw);
+      if (metadata.name) session.name = metadata.name;
+    } catch { throw new Error("Invalid or unreadable session metadata; contents were not displayed"); }
+  }
   return { sessions, truncated: names.length > 200 };
 }
 
-export async function saveSession(project: Project, messages: Message[], model: CodingModel): Promise<string> {
+export async function latestSession(project: Project): Promise<string> {
+  const latest = (await listSessions(project)).sessions[0];
+  if (!latest) throw new Error("No saved sessions in this workspace; nothing was persisted automatically");
+  return latest.id;
+}
+
+export async function saveSession(project: Project, messages: Message[], model: CodingModel, name?: string): Promise<string> {
   await sessionDirectory(project, true);
   const id = randomUUID();
   const content = JSON.stringify(snapshotSchema.parse({
     version: 1, root: project.workspace.root, provider: project.config.llm.provider, model: project.config.llm.model,
-    messages, native: model.exportHistory?.(messages),
+    messages, native: model.exportHistory?.(messages), ...(name ? { name } : {}),
   }));
   if (Buffer.byteLength(content) > 8_000_000) throw new Error("Session snapshot exceeds 8 MB; start a new conversation");
   const filename = await resolvePath(project.workspace.root, `.jev/sessions/${id}.json`, true);
@@ -79,6 +97,7 @@ export async function restoreSession(project: Project, id: string, model: Coding
     snapshot.model !== project.config.llm.model) throw new Error("Resume requires the original workspace, provider, and model");
   const pending = new Set<string>();
   for (const [index, message] of snapshot.messages.entries()) {
+    if (message.images?.length && message.role !== "user") throw new Error("Invalid saved image-message role");
     if (message.role === "system" && index !== 0) throw new Error("Invalid saved system-message position");
     if (message.role === "tool") {
       if (!message.tool_call_id || !pending.delete(message.tool_call_id)) throw new Error("Invalid saved tool result");
@@ -97,6 +116,7 @@ export async function restoreSession(project: Project, id: string, model: Coding
     role: message.role, content: message.content,
     ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
     ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+    ...(message.images ? { images: message.images } : {}),
   }));
   if (model.restoreHistory) {
     try { model.restoreHistory(messages, snapshot.native); }

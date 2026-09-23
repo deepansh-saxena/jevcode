@@ -6,7 +6,7 @@ export const executionToolNames = [
   "list_files", "read_file", "search_files", "write_file", "replace_text", "run_command",
 ] as const;
 export const toolNames = [
-  ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task",
+  ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task", "ask_user",
 ] as const;
 export type ToolName = (typeof toolNames)[number] | "load_skill_resource" | `mcp__${string}`;
 

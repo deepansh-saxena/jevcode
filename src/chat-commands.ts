@@ -5,9 +5,11 @@ import { createCodingModel, type CodingModel, type Message } from "./llm.js";
 import type { RunOptions, RunResult } from "./runtime.js";
 import { createTools, toolSpecs } from "./tools.js";
 import { capabilityCatalog, capabilityTools, describeCapability, reloadCapabilities } from "./capabilities.js";
-import { listSessions, restoreSession, saveSession } from "./session.js";
+import { latestSession, listSessions, restoreSession, saveSession } from "./session.js";
 import { compactConversation, contextSize } from "./context.js";
 import { handleExtensionCommand, type ExtensionHost } from "./extensions.js";
+import { readImage, requireImageSupport, MAX_IMAGES, type ImageAttachment } from "./media.js";
+import { exportTranscript, workspaceDiff } from "./chat-files.js";
 
 const commands: Record<string, string> = {
   help: "Show commands; Tab completes commands and installed skill names",
@@ -33,9 +35,17 @@ const commands: Record<string, string> = {
   reload: "Reload capabilities and AGENTS.md; retain session settings",
   review: "Run a read-only review; optional scope text",
   jev: "Set routing off | shadow | on for this chat; guardrails are unchanged",
-  save: "Confirm saving a private unencrypted conversation snapshot",
+  save: "Confirm saving a private unencrypted conversation snapshot; optional NAME",
   sessions: "List private saved snapshots and resume UUIDs",
   resume: "List saved snapshots, or load UUID for this workspace/provider/model",
+  continue: "Restore the most recently saved snapshot (never implicitly persisted)",
+  name: "Set the name included in future explicit snapshots",
+  attach: "Attach a workspace image to the next task after provider-sharing confirmation",
+  detach: "Discard pending image attachments",
+  editor: "Compose a prompt using explicitly configured JEV_EDITOR; preview and confirm before sending",
+  diff: "Show bounded tracked git changes against HEAD, omitting protected paths",
+  export: "Confirm exporting user/assistant text to a new private workspace file",
+  "auto-compact": "Opt into between-turn semantic compaction: on | off",
   exit: "Leave the chat",
   quit: "Alias for /exit",
 };
@@ -50,6 +60,9 @@ export interface ChatState {
   compactions: number;
   metrics: RunResult["metrics"];
   extensions?: ExtensionHost;
+  attachments?: ImageAttachment[];
+  name?: string;
+  autoCompact?: boolean;
 }
 
 export function newChatMetrics(): RunResult["metrics"] {
@@ -82,8 +95,9 @@ export function commandCompletions(project: Project, line: string): [string[], s
 
 export interface CommandIO {
   write: (text: string) => void;
-  confirm: (prompt: string) => Promise<boolean>;
+  confirm: (prompt: string, signal?: AbortSignal) => Promise<boolean>;
   signal: AbortSignal;
+  editor?: () => Promise<string>;
 }
 
 export type ChatCommandResult =
@@ -125,6 +139,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     case "clear": case "new":
       noArguments();
       state.messages = [];
+      state.attachments = [];
       io.write("Conversation cleared; workspace files and session permissions are unchanged.\n");
       return handled;
     case "status":
@@ -232,6 +247,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       state.model = model;
       project.config.llm = config;
       state.messages = [];
+      state.attachments = [];
       io.write(`Model set to ${argument} for this chat; context cleared. Account access is verified on the next request.\n`);
       return handled;
     }
@@ -312,13 +328,68 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       return handled;
     }
     case "save":
-      noArguments();
+      if (argument.length > 80) throw new Error("Session names must be at most 80 characters");
       if (!await io.confirm("Save conversation, file contents, and provider history unencrypted in a private local snapshot? Type yes: ")) {
         io.write("Not saved.\n"); return handled;
       }
       io.signal.throwIfAborted();
-      io.write(`Saved. Resume with: jevcode --resume ${await saveSession(project, state.messages, state.model)}\n`);
+      io.write(`Saved. Resume with: jevcode --resume ${await saveSession(project, state.messages, state.model, argument || state.name)}\n`);
       return handled;
+    case "name":
+      if (!argument || argument.length > 80) throw new Error("Usage: /name NAME (1-80 characters)");
+      state.name = argument;
+      io.write("Session named; nothing saved until /save.\n");
+      return handled;
+    case "attach": {
+      if (!argument) throw new Error("Usage: /attach workspace-relative-image.png");
+      if ((state.attachments?.length ?? 0) >= MAX_IMAGES) throw new Error(`At most ${MAX_IMAGES} images per task`);
+      const image = await readImage(project.workspace, argument);
+      requireImageSupport(state.model, project.config.llm.model, [image]);
+      if (!await io.confirm(`Send this ${image.mimeType} image (${Buffer.byteLength(image.data, "base64")} bytes) to ${project.config.llm.provider}/${project.config.llm.model} with your next task? Type yes: `)) {
+        io.write("Image not attached.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      (state.attachments ??= []).push(image);
+      io.write(`Attached image ${state.attachments.length}; /detach discards pending images. Image bytes are not sent to Jev routing or event logs.\n`);
+      return handled;
+    }
+    case "detach":
+      noArguments(); state.attachments = []; io.write("Pending images discarded.\n"); return handled;
+    case "editor": {
+      noArguments();
+      if (!io.editor) throw new Error("External editing is only available in the interactive terminal");
+      const prompt = await io.editor();
+      io.write(`Editor prompt preview:\n${prompt}\n`);
+      if (!await io.confirm("Send this editor prompt to the coding model? Type yes: ")) {
+        io.write("Editor prompt discarded.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      return { kind: "task", task: prompt };
+    }
+    case "diff":
+      noArguments(); io.write(await workspaceDiff(project, io.signal)); return handled;
+    case "export":
+      if (!argument) throw new Error("Usage: /export NEW_WORKSPACE_FILE");
+      await project.workspace.path(argument, true);
+      if (!await io.confirm("Export user/assistant conversation text (may contain private source code) to a new unencrypted local file? Type yes: ")) {
+        io.write("Not exported.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      await exportTranscript(project, argument, state.messages);
+      io.write("Transcript exported privately; image bytes and tool/system messages omitted.\n");
+      return handled;
+    case "auto-compact":
+      if (argument !== "on" && argument !== "off") throw new Error("Usage: /auto-compact on|off");
+      if (argument === "on" && !state.autoCompact && !await io.confirm("Allow automatic model summaries between turns at 65% context usage? This uses tokens and may omit older detail. Nothing is saved automatically. Type yes: ")) {
+        io.write("Automatic compaction unchanged.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      state.autoCompact = argument === "on";
+      io.write(`Automatic between-turn compaction ${argument}.\n`);
+      return handled;
+    case "continue":
+      noArguments();
+      return handleChatCommand(`/resume ${await latestSession(project)}`, state, io);
     case "sessions": case "resume":
       if (!argument) { print(await listSessions(project)); return handled; }
       if (name === "sessions" || parts.length !== 1) throw new Error(`Usage: /${name}${name === "resume" ? " [UUID]" : ""}`);
@@ -327,6 +398,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       }
       io.signal.throwIfAborted();
       state.messages = await restoreSession(project, argument, state.model);
+      state.attachments = [];
       io.write("Saved conversation restored. Current permissions and project instructions still apply.\n");
       return handled;
     default:
