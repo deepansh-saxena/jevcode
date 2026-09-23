@@ -1,3 +1,12 @@
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { promisify } from "node:util";
+import { brotliDecompress, unzip } from "node:zlib";
+
+const decodeCompressed = promisify(unzip);
+const decodeBrotli = promisify(brotliDecompress);
+const MAX_RESPONSE_BYTES = 2_000_000;
+
 export interface Usage {
   inputTokens: number;
   outputTokens: number;
@@ -13,37 +22,70 @@ export class HttpError extends Error {
 export async function postJson(
   url: string, authorization: string, body: unknown, signal: AbortSignal, timeoutMs: number,
 ): Promise<unknown> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { Authorization: authorization, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
-    redirect: "error",
-  });
-  if (!response.ok) {
-    await response.body?.cancel();
-    throw new HttpError(response.status);
+  signal.throwIfAborted();
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
+    throw new RangeError("HTTP timeout must be an integer between 0 and 2147483647 milliseconds");
   }
-  if (!response.body) throw new Error("API returned an empty response");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
+  const endpoint = new URL(url);
+  if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
+    throw new Error("API endpoint must be HTTP(S) without embedded credentials");
+  }
+  const serialized = JSON.stringify(body);
+  const request = (endpoint.protocol === "https:" ? httpsRequest : httpRequest)(endpoint, {
+    method: "POST",
+    headers: { Authorization: authorization, "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate, br" },
+  });
+  let response: IncomingMessage | undefined;
+  let stopped: unknown;
+  const stop = (reason: unknown): void => {
+    stopped = reason;
+    request.destroy(reason instanceof Error ? reason : new Error("API request cancelled"));
+  };
+  const abort = (): void => stop(signal.reason);
+  signal.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(() => stop(new DOMException("API request timed out", "TimeoutError")), timeoutMs);
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    response = await new Promise<IncomingMessage>((resolve, reject) => {
+      request.once("response", resolve);
+      request.once("error", reject);
+      request.end(serialized);
+    });
+    const status = response.statusCode ?? 0;
+    if (status < 200 || status >= 300) throw new HttpError(status);
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of response) {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       size += value.byteLength;
-      if (size > 2_000_000) throw new Error("API response exceeded the size limit");
+      if (size > MAX_RESPONSE_BYTES) throw new Error("API response exceeded the size limit");
       chunks.push(value);
     }
-  } finally {
-    await reader.cancel();
-    reader.releaseLock();
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+    const encoding = response.headers["content-encoding"]?.toLowerCase();
+    let content: Buffer = Buffer.concat(chunks);
+    if (encoding && encoding !== "identity") {
+      if (!["gzip", "deflate", "br"].includes(encoding)) throw new Error("API returned an unsupported content encoding");
+      try {
+        content = await (encoding === "br" ? decodeBrotli : decodeCompressed)(content, { maxOutputLength: MAX_RESPONSE_BYTES });
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ERR_BUFFER_TOO_LARGE") {
+          throw new Error("API response exceeded the size limit");
+        }
+        throw error;
+      }
+    }
+    if (stopped !== undefined) throw stopped;
+    try {
+      return JSON.parse(content.toString("utf8")) as unknown;
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new Error("API returned invalid JSON");
+      throw error;
+    }
   } catch (error) {
-    if (error instanceof SyntaxError) throw new Error("API returned invalid JSON");
-    throw error;
+    throw stopped ?? error;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+    response?.destroy();
+    request.destroy();
   }
 }
