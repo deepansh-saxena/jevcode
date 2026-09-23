@@ -1,13 +1,12 @@
-import { constants } from "node:fs";
-import { mkdir, open, rename, unlink, stat, link } from "node:fs/promises";
-import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
 import { z } from "zod";
 import type { Config, ToolName } from "./config.js";
-import { BlockedError, isMissing } from "./errors.js";
+import { executionSchema } from "./config.js";
+import { BlockedError } from "./errors.js";
 import type { ToolSpec } from "./llm.js";
-import { digest, readText, Workspace } from "./workspace.js";
+import { checkVersion, digest, writeVersion, Workspace } from "./workspace.js";
+import { executeProcess, validateExecution } from "./execution.js";
+import type { ExecutionSession } from "./lifecycle.js";
+import type { Emit } from "./events.js";
 
 export interface PreparedAction {
   name: ToolName;
@@ -24,6 +23,7 @@ export interface Tool {
 export interface Permissions {
   write: boolean;
   commands: boolean;
+  execution?: boolean;
 }
 const filepath = z.string().min(1).max(1024);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -43,113 +43,33 @@ const replaceSchema = z.object({
   newText: z.string().max(64_000), expectedHash: hash,
 }).strict();
 const commandInput = z.object({ commandId: z.string().min(1).max(64) }).strict();
-
-async function currentHash(workspace: Workspace, relative: string): Promise<string | null> {
-  try {
-    return digest(await readText(await workspace.path(relative, true)));
-  } catch (error) {
-    if (isMissing(error)) return null;
-    throw error;
-  }
-}
-
-async function checkVersion(workspace: Workspace, relative: string, expected: string | null): Promise<void> {
-  if (await currentHash(workspace, relative) !== expected) {
-    throw new Error("File changed or expectedHash is incorrect; read the file again before editing");
-  }
-}
-
-async function writeVersion(
-  workspace: Workspace, relative: string, content: string, expected: string | null, signal: AbortSignal,
-): Promise<unknown> {
-  signal.throwIfAborted();
-  const target = await workspace.path(relative, true);
-  await checkVersion(workspace, relative, expected);
-  await mkdir(path.dirname(target), { recursive: true });
-  await workspace.path(relative, true);
-  const mode = expected === null ? 0o600 : (await stat(target)).mode & 0o777;
-  const temporary = path.join(path.dirname(target), `.jev-write-${randomUUID()}`);
-  try {
-    const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
-    try {
-      await file.writeFile(content);
-    } finally {
-      await file.close();
-    }
-    signal.throwIfAborted();
-    await workspace.path(relative, true);
-    await checkVersion(workspace, relative, expected);
-    if (expected === null) await link(temporary, target);
-    else await rename(temporary, target);
-  } finally {
-    try { await unlink(temporary); } catch (error) { if (!isMissing(error)) throw error; }
-  }
-  return { path: relative, sha256: digest(content), bytesWritten: Buffer.byteLength(content) };
-}
+const executionInput = z.object({
+  executable: z.string().min(1).max(4096).optional(),
+  args: z.array(z.string().max(16_000)).max(100).optional(),
+  shell: z.string().min(1).max(16_000).optional(),
+  cwd: filepath.default("."),
+  timeoutMs: z.number().int().min(100).max(3_600_000).default(30_000),
+  background: z.boolean().default(false),
+}).strict();
 
 export async function executeCommand(
   workspace: Workspace, command: Config["commands"][string], signal: AbortSignal,
 ): Promise<unknown> {
-  signal.throwIfAborted();
-  return new Promise((resolve, reject) => {
-    const env: NodeJS.ProcessEnv = {};
-    for (const name of ["PATH", "HOME", "TMPDIR", "LANG", "SystemRoot"]) {
-      if (process.env[name]) env[name] = process.env[name];
-    }
-    const child = spawn(command.executable, command.args, {
-      cwd: workspace.root, env, shell: false, detached: process.platform !== "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const chunks: Buffer[] = [];
-    let bytes = 0;
-    let failure: Error | undefined;
-    let killTimer: NodeJS.Timeout | undefined;
-    const kill = (kind: NodeJS.Signals): void => {
-      if (!child.pid) return;
-      try {
-        if (process.platform === "win32") child.kill(kind);
-        else process.kill(-child.pid, kind);
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) {
-          failure ??= error instanceof Error ? error : new Error("Failed to terminate command");
-        }
-      }
-    };
-    const stop = (message: string): void => {
-      if (failure) return;
-      failure = new Error(message);
-      kill("SIGTERM");
-      killTimer = setTimeout(() => {
-        kill("SIGKILL");
-        child.stdout.destroy();
-        child.stderr.destroy();
-      }, 500);
-    };
-    const onAbort = (): void => stop("Command cancelled");
-    signal.addEventListener("abort", onAbort, { once: true });
-    const timer = setTimeout(() => stop("Command exceeded its deadline"), command.timeoutMs);
-    const collect = (chunk: Buffer): void => {
-      bytes += chunk.length;
-      if (bytes > 64_000) stop("Command exceeded the output limit");
-      else chunks.push(chunk);
-    };
-    child.stdout.on("data", collect);
-    child.stderr.on("data", collect);
-    child.on("error", (error) => { failure = error; });
-    child.on("close", (code, terminatedBy) => {
-      clearTimeout(timer);
-      clearTimeout(killTimer);
-      signal.removeEventListener("abort", onAbort);
-      // Commands may spawn descendants; do not leave their process group running.
-      kill("SIGKILL");
-      if (failure) reject(failure);
-      else resolve({ ok: code === 0, exitCode: code, signal: terminatedBy, output: Buffer.concat(chunks).toString("utf8") });
-    });
-    if (signal.aborted) onAbort();
+  const result = await executeProcess(workspace, executionSchema.parse({}), command, signal).catch((error: unknown) => {
+    if (signal.aborted) throw new Error("Command cancelled");
+    throw error;
   });
+  if (result.error) throw new Error(result.error);
+  return { ok: result.ok, exitCode: result.exitCode, signal: result.signal, output: result.output };
 }
 
-export function createTools(workspace: Workspace, config: Config, permissions: Permissions): Tool[] {
+export function createTools(workspace: Workspace, config: Config, permissions: Permissions,
+  session?: ExecutionSession, emit?: Emit): Tool[] {
+  const configuredExecutionInput = executionInput.extend({
+    timeoutMs: z.number().int().min(100).max(config.execution.maxTimeoutMs).default(Math.min(30_000, config.execution.maxTimeoutMs)),
+  });
+  const edit = (relative: string, content: string, expected: string | null, signal: AbortSignal): Promise<unknown> =>
+    session ? session.checkpoints.edit(relative, content, expected, signal) : writeVersion(workspace, relative, content, expected, signal);
   const tools: Tool[] = [
     {
       name: "list_files", description: "List up to 500 accessible workspace files recursively. Excludes protected paths and symbolic links.",
@@ -225,7 +145,7 @@ export function createTools(workspace: Workspace, config: Config, permissions: P
         await checkVersion(workspace, args.path, args.expectedHash);
         return {
           name: "write_file", mutating: true, details: args,
-          execute: (signal) => writeVersion(workspace, args.path, args.content, args.expectedHash, signal),
+          execute: (signal) => edit(args.path, args.content, args.expectedHash, signal),
         };
       },
     }, {
@@ -244,7 +164,7 @@ export function createTools(workspace: Workspace, config: Config, permissions: P
         if (Buffer.byteLength(updated) > 1_048_576) throw new Error("Edited file exceeds the file size limit");
         return {
           name: "replace_text", mutating: true, details: args,
-          execute: (signal) => writeVersion(workspace, args.path, updated, args.expectedHash, signal),
+          execute: (signal) => edit(args.path, updated, args.expectedHash, signal),
         };
       },
     });
@@ -252,16 +172,67 @@ export function createTools(workspace: Workspace, config: Config, permissions: P
   if (permissions.commands && Object.keys(config.commands).length) {
     tools.push({
       name: "run_command",
-      description: `Execute one configured command after explicit user approval. No arbitrary shell or arguments. Commands: ${JSON.stringify(config.commands)}. Commands are NOT sandboxed.`,
+      description: `Execute one configured command after explicit user approval. No arbitrary shell or arguments. Commands: ${JSON.stringify(config.commands)}. Unsandboxed unless Docker isolation is explicitly configured.`,
       schema: commandInput,
       async prepare(input) {
         const args = commandInput.parse(input);
-        const command = Object.hasOwn(config.commands, args.commandId) ? config.commands[args.commandId] : undefined;
+        const command = Object.hasOwn(config.commands, args.commandId) ? structuredClone(config.commands[args.commandId]) : undefined;
         if (!command) throw new BlockedError("Unknown configured command");
+        const policy = structuredClone(config.execution);
         return {
-          name: "run_command", mutating: true, details: { ...args, ...command, warning: "Runs project code with your OS permissions; not sandboxed." },
-          execute: (signal) => executeCommand(workspace, command, signal),
+          name: "run_command", mutating: true, details: { ...args, ...command, isolation: policy.isolation,
+            warning: policy.isolation.backend === "none" ? "Runs project code with your OS permissions; not sandboxed." :
+              "Runs in the configured Docker image, network disabled. The entire workspace is mounted writable, including protected files." },
+          execute: (signal) => session ? session.execute(command, signal, emit, policy) : executeProcess(workspace, policy, command, signal),
         };
+      },
+    });
+  }
+  if (session) {
+    if (permissions.execution) tools.push({
+      name: "exec_command",
+      description: "Run a proposed executable with args OR a shell command, only after fresh exact-action approval. Background jobs are attached, bounded and stopped on session exit; standalone runs stop them before returning. Unsandboxed unless Docker isolation is explicitly configured. cwd must be an accessible workspace directory. Shell/arguments can access files beyond tool path guards; no shell edits are checkpointed.",
+      schema: configuredExecutionInput,
+      async prepare(input) {
+        const args = configuredExecutionInput.parse(input);
+        await validateExecution(workspace, args);
+        const policy = structuredClone(config.execution);
+        return { name: "exec_command", mutating: true, details: { ...args, isolation: policy.isolation,
+          warning: policy.isolation.backend === "none" ?
+            "UNSANDBOXED: arbitrary code runs with your OS permissions. Path guards constrain cwd, not code or arguments. It can read/write outside the workspace, including credentials. Only explicitly inherited environment keys are supplied. Shell changes are NOT checkpointed." :
+            "Docker isolation: network off, no home credentials, workspace-only host mount. ALL workspace files are mounted writable, including protected paths. No image is downloaded. Shell changes are NOT checkpointed.",
+        }, execute: (signal) => session.execute(args, signal, emit, policy) };
+      },
+    });
+    const idInput = z.object({ taskId: z.string().uuid() }).strict();
+    for (const name of ["task_list", "task_read", "task_wait", "task_stop"] as const) tools.push({
+      name, description: `${name}: inspect, await, or cancel an existing attached task. Does not launch work or request approval.`,
+      schema: name === "task_list" ? z.object({}).strict() : idInput,
+      async prepare(input) {
+        const args = name === "task_list" ? z.object({}).strict().parse(input) : idInput.parse(input);
+        return { name, mutating: false, details: args, async execute(signal) {
+          if (name === "task_list") return session.tasks.list();
+          const { taskId } = idInput.parse(args);
+          if (name === "task_read") return session.tasks.read(taskId);
+          if (name === "task_wait") return session.tasks.wait(taskId, signal);
+          return session.tasks.stop(taskId);
+        } };
+      },
+    });
+    tools.push({
+      name: "list_checkpoints", description: "List session-private checkpoints of harness edits only. Shell/external edits are not captured.",
+      schema: z.object({}).strict(),
+      async prepare(input) {
+        z.object({}).strict().parse(input);
+        return { name: "list_checkpoints", mutating: false, details: {}, async execute() { return session.checkpoints.list(); } };
+      },
+    });
+    if (permissions.write) tools.push({
+      name: "undo_edit", description: "Undo one harness edit after approval, only if the file still exactly matches its checkpoint. Never overwrites subsequent user or external changes.",
+      schema: z.object({ checkpointId: z.string().uuid() }).strict(),
+      async prepare(input) {
+        const { checkpointId } = z.object({ checkpointId: z.string().uuid() }).strict().parse(input);
+        return session.checkpoints.prepareUndo(checkpointId);
       },
     });
   }

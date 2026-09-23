@@ -3,9 +3,10 @@ import { z } from "zod";
 export const idSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 export const executionToolNames = [
   "list_files", "read_file", "search_files", "write_file", "replace_text", "run_command",
+  "exec_command", "task_list", "task_read", "task_wait", "task_stop", "list_checkpoints", "undo_edit",
 ] as const;
 export const toolNames = [
-  ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task",
+  ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task", "delegate_parallel",
 ] as const;
 export type ToolName = (typeof toolNames)[number];
 
@@ -22,6 +23,32 @@ const endpoint = z.string().url().refine((value) => {
     (url.protocol === "https:" ||
       (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)));
 }, "Use HTTPS, or loopback HTTP for local development, without credentials/query/fragment");
+
+const rateSchema = z.object({
+  inputUsdPerMillion: z.number().finite().nonnegative(),
+  outputUsdPerMillion: z.number().finite().nonnegative(),
+}).strict();
+export const executionSchema = z.object({
+  maxJobs: z.number().int().min(1).max(8).default(3),
+  maxTasks: z.number().int().min(1).max(200).default(100),
+  maxOutputBytes: z.number().int().min(1024).max(1_000_000).default(64_000),
+  maxTimeoutMs: z.number().int().min(100).max(3_600_000).default(120_000),
+  maxParallelSpecialists: z.number().int().min(1).max(8).default(3),
+  isolation: z.discriminatedUnion("backend", [
+    z.object({ backend: z.literal("none") }).strict(),
+    z.object({
+      backend: z.literal("docker"),
+      executable: z.string().min(1).default("docker"),
+      image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$/,
+        "Use an explicit image pinned by sha256 digest; images are never pulled"),
+    }).strict(),
+  ]).default({ backend: "none" }),
+}).strict();
+export const spendSchema = z.object({
+  maxUsd: z.number().finite().positive().optional(),
+  models: z.record(z.string().min(1), rateSchema).default({}),
+  jev: rateSchema.optional(),
+}).strict();
 
 export const configSchema = z.object({
   version: z.literal(1),
@@ -68,6 +95,8 @@ export const configSchema = z.object({
     value.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
   "Use normalized workspace-relative file or directory paths")).default([]),
   commands: z.record(idSchema, commandSchema).default({}),
+  execution: executionSchema.prefault({}),
+  spend: spendSchema.prefault({}),
 }).strict().superRefine((value, context) => {
   if ((value.jev.mode !== "off" || value.jev.guardrail !== "off") && !value.jev.allowDataSharing) {
     context.addIssue({
