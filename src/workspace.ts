@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open, lstat, realpath, readdir } from "node:fs/promises";
+import { open, lstat, realpath, readdir, mkdir, mkdtemp, rename, link, unlink, rmdir } from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { BlockedError, isMissing } from "./errors.js";
@@ -104,10 +104,74 @@ export async function readText(filename: string, maxBytes = MAX_FILE_BYTES): Pro
       bytes += result.bytesRead;
     }
     if (bytes > maxBytes) throw new Error(`File exceeds ${maxBytes} bytes`);
-    const content = buffer.subarray(0, bytes).toString("utf8");
+    const content = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, bytes));
     if (content.includes("\0")) throw new Error("Binary files are not supported");
     return content;
   } finally {
     await file.close();
   }
+}
+
+export async function currentHash(workspace: Workspace, relative: string): Promise<string | null> {
+  try { return digest(await readText(await workspace.path(relative, true))); }
+  catch (error) { if (isMissing(error)) return null; throw error; }
+}
+
+export async function checkVersion(workspace: Workspace, relative: string, expected: string | null): Promise<void> {
+  if (await currentHash(workspace, relative) !== expected) {
+    throw new Error("File changed or expectedHash is incorrect; read the file again before editing");
+  }
+}
+
+export async function writeVersion(workspace: Workspace, relative: string, content: string | null,
+  expected: string | null, signal: AbortSignal): Promise<{ path: string; sha256: string | null; bytesWritten: number }> {
+  signal.throwIfAborted();
+  const target = await workspace.path(relative, true);
+  await checkVersion(workspace, relative, expected);
+  if (content === null && expected === null) throw new Error("Cannot delete a nonexistent file");
+  await mkdir(path.dirname(target), { recursive: true });
+  await workspace.path(relative, true);
+  const staging = await mkdtemp(path.join(path.dirname(target), ".jev-write-"));
+  const staged = path.join(staging, "next");
+  const previous = path.join(staging, "previous");
+  let captured = false;
+  let preserve = false;
+  try {
+    if (content !== null) {
+      const mode = expected === null ? 0o600 : (await lstat(target)).mode & 0o777;
+      const file = await open(staged, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, mode);
+      try { await file.writeFile(content); } finally { await file.close(); }
+    }
+    signal.throwIfAborted();
+    await workspace.path(relative, true);
+    await checkVersion(workspace, relative, expected);
+    if (expected !== null) {
+      // Capture first, validate the captured inode, then install without replacing anything created meanwhile.
+      await rename(target, previous);
+      captured = true;
+      if (digest(await readText(previous)) !== expected) throw new Error("File changed while editing; edit not applied");
+    }
+    signal.throwIfAborted();
+    await workspace.path(relative, true);
+    if (content !== null) await link(staged, target);
+    else if (await currentHash(workspace, relative) !== null) throw new Error("File recreated while undoing; undo not applied");
+    if (captured) { await unlink(previous); captured = false; }
+  } catch (error) {
+    if (captured) {
+      try {
+        await workspace.path(relative, true);
+        await link(previous, target);
+        await unlink(previous);
+        captured = false;
+      } catch (restoreError) {
+        preserve = true;
+        throw new Error(`Edit conflict: no new file was overwritten. Captured file retained privately at ${previous}; manual recovery required`, { cause: restoreError });
+      }
+    }
+    throw error;
+  } finally {
+    try { await unlink(staged); } catch (error) { if (!isMissing(error)) throw error; }
+    if (!preserve) await rmdir(staging);
+  }
+  return { path: relative, sha256: content === null ? null : digest(content), bytesWritten: content === null ? 0 : Buffer.byteLength(content) };
 }

@@ -5,6 +5,7 @@ import type { Emit } from "./events.js";
 import { HttpError, postJson, type Usage } from "./http.js";
 import type { Project } from "./registry.js";
 import { normalizeJevKey } from "./jev-key.js";
+import type { Reservation } from "./budget.js";
 
 const probability = z.number().min(0).max(1);
 const answerSchema = z.discriminatedUnion("type", [
@@ -45,6 +46,7 @@ export class JevClient {
     private key: string | undefined,
     private emit: Emit,
     private account: (usage: Usage) => void,
+    private reserve?: (request: unknown) => Reservation,
   ) {}
 
   async evaluate(state: unknown, questions: Record<string, Question>, signal: AbortSignal): Promise<Record<string, Answer>> {
@@ -52,6 +54,7 @@ export class JevClient {
     if (!this.key) throw new Error(`Missing ${this.config.apiKeyEnv}`);
     const key = normalizeJevKey(this.key);
     ensureShareable({ state, questions });
+    const reservation = this.reserve?.({ model: this.config.model, state, questions });
     const started = performance.now();
     this.emit("jev_request", { questionCount: Object.keys(questions).length });
     try {
@@ -60,7 +63,9 @@ export class JevClient {
       }, signal, this.config.timeoutMs);
       const parsed = responseSchema.safeParse(raw);
       if (!parsed.success) throw new Error("Invalid Jev response schema");
-      this.account({ inputTokens: parsed.data.usage.input_tokens, outputTokens: parsed.data.usage.output_tokens });
+      const usage = { inputTokens: parsed.data.usage.input_tokens, outputTokens: parsed.data.usage.output_tokens };
+      this.account(usage);
+      reservation?.settle(usage);
       const { answers } = parsed.data;
       if (Object.keys(answers).length !== Object.keys(questions).length) {
         throw new Error("Jev returned an unexpected question set");
@@ -81,6 +86,7 @@ export class JevClient {
       this.emit("jev_response", { model: parsed.data.model, durationMs: Math.round(performance.now() - started) });
       return answers;
     } catch (error) {
+      reservation?.fail();
       let failure = error;
       if (error instanceof HttpError) {
         const guidance = error.status === 401 ?
@@ -108,7 +114,7 @@ export interface Route {
 
 export interface RoutingContext {
   previousUserTasks?: string[];
-  permissions?: { write: boolean; commands: boolean };
+  permissions?: { write: boolean; commands: boolean; execution?: boolean };
 }
 
 export async function routeTask(
@@ -134,8 +140,8 @@ export async function routeTask(
   }
   const eligible = project.specialists.filter((specialist) => specialist.skills.every((id) =>
     project.skills.find((skill) => skill.id === id)?.modelInvocable !== false) && specialist.tools.some((tool) =>
-    ["list_files", "read_file", "search_files"].includes(tool) ||
-    (tool === "run_command" ? context.permissions?.commands : context.permissions?.write)));
+    ["list_files", "read_file", "search_files", "task_list", "task_read", "task_wait", "task_stop", "list_checkpoints"].includes(tool) ||
+    (tool === "run_command" ? context.permissions?.commands : tool === "exec_command" ? context.permissions?.execution : context.permissions?.write)));
   if (project.config.jev.routeSpecialists !== false && project.config.limits.maxSpecialistRuns > 0 &&
     !baseline.specialistId && eligible.length) {
     questions.delegation = {

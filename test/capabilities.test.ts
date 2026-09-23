@@ -156,7 +156,9 @@ test("explicitly disabled dynamic capabilities and independent routing flags rem
   });
   assert.equal((await run(project, options(model))).status, "completed");
   const noDynamic = scripted([final()], (_messages, tools) => {
-    assert.deepEqual(tools.map((tool) => tool.function.name), ["list_files", "read_file", "search_files"]);
+    assert.deepEqual(tools.map((tool) => tool.function.name), [
+      "list_files", "read_file", "search_files", "task_list", "task_read", "task_wait", "task_stop", "list_checkpoints",
+    ]);
   });
   assert.equal((await run(project, options(noDynamic, { dynamicCapabilities: false }))).status, "completed");
   project.config.llm.model = "session-override";

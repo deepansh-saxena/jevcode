@@ -10,12 +10,17 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function shorten(serialized: string, maxChars: number, contextPruned: boolean): string {
   const value: unknown = JSON.parse(serialized);
-  const key = record(value) ? ["content", "output", "error"].find((name) => typeof value[name] === "string") : undefined;
-  const text = record(value) && key ? String(value[key]) : serialized;
-  const metadata = record(value) && key ? { ...value, [key]: "" } : {};
+  const nested = record(value) && record(value.result);
+  const payload = nested && record(value) ? value.result : value;
+  const keys = record(payload) ? ["content", "output", "stdout", "stderr", "error"].filter((name) => typeof payload[name] === "string") : [];
+  const lengths = record(payload) ? keys.map((key) => String(payload[key]).length) : [];
+  const metadata = (length: number): Record<string, unknown> => {
+    if (!record(payload) || !keys.length) return { preview: serialized.slice(0, length) };
+    const shortened = { ...payload, ...Object.fromEntries(keys.map((key) => [key, String(payload[key]).slice(0, length)])) };
+    return nested && record(value) ? { ...value, result: shortened } : shortened;
+  };
   const render = (length: number): string => JSON.stringify({
-    ...metadata,
-    [key ?? "preview"]: text.slice(0, length),
+    ...metadata(length),
     truncated: true,
     ...(contextPruned ? { contextPruned: true } : {}),
     originalChars: serialized.length,
@@ -24,7 +29,7 @@ function shorten(serialized: string, maxChars: number, contextPruned: boolean): 
       "Tool output shortened to fit its result budget. Omitted content is not evidence.",
   });
   let low = 0;
-  let high = text.length;
+  let high = keys.length ? Math.max(...lengths) : serialized.length;
   let result = render(0);
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
