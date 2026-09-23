@@ -136,3 +136,28 @@ test("stdio EOF denies pending actions and /exit closes cleanly", async (t) => {
   assert.equal((await other.next((p) => p.id === "exit")).result!.kind, "exit");
   assert.equal(other.input.destroyed, true);
 });
+
+test("stdio keeps checkpoints across prompts and requires a separately correlated undo approval", async (t) => {
+  const p = await protocol(t, scripted([call("write_file", { path: "undo.txt", content: "temporary", expectedHash: null }), final()]), true);
+  p.send({ id: "write", method: "prompt", params: { text: "Create undo.txt" } });
+  const writeApproval = await p.next((p) => p.event === "approval_request");
+  p.send({ id: "approve-write", method: "approve", params: {
+    runId: "write", requestId: writeApproval.data!.requestId, approved: true,
+  } });
+  assert.equal((await p.next((p) => p.id === "write")).result!.result!.status, "completed");
+  p.send({ id: "checkpoints", method: "prompt", params: { text: "/checkpoints" } });
+  const list = await p.next((p) => p.event === "text" && p.runId === "checkpoints");
+  const checkpoints = JSON.parse(list.data!.text!) as { id: string; path: string }[];
+  assert.equal(checkpoints[0]!.path, "undo.txt");
+  await p.next((p) => p.id === "checkpoints");
+  p.send({ id: "undo", method: "prompt", params: { text: `/undo ${checkpoints[0]!.id}` } });
+  const undoApproval = await p.next((p) => p.event === "approval_request");
+  assert.notEqual(undoApproval.data!.requestId, writeApproval.data!.requestId);
+  p.send({ id: "approve-undo", method: "approve", params: {
+    runId: "undo", requestId: undoApproval.data!.requestId, approved: true,
+  } });
+  assert.equal((await p.next((p) => p.id === "undo")).result!.kind, "handled");
+  await assert.rejects(p.project.workspace.read("undo.txt"), /ENOENT/);
+  p.send({ id: "tasks", method: "prompt", params: { text: "/tasks" } });
+  assert.equal((await p.next((p) => p.id === "tasks")).result!.kind, "handled");
+});

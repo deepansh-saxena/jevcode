@@ -73,6 +73,12 @@ image token usage is provider-specific and reported after requests. Snapshot
 size remains capped at 8 MB, so large image conversations may not be saveable
 without compaction.
 
+That character estimate is not a vision-token price or guaranteed upper bound.
+Uncapped image requests reserve the remaining token allowance and reconcile
+reported usage. With `spend.maxUsd`, image-bearing requests (including historical
+images or compaction) are blocked because no verified provider vision-token
+upper bound is available.
+
 ## Explicit session and file operations
 
 `/name NAME` labels future snapshots without saving anything. `/save [NAME]`
@@ -103,8 +109,18 @@ latest user task and its images, and a clearly untrusted historical summary.
 It does not carry approvals forward. Older image observations may be summarized;
 reread source evidence before editing. Failed, oversized, tool-calling, or
 non-shrinking summaries leave original context intact and visibly stop that turn.
-Compaction is never persisted automatically. Automatic compaction is refused
-when a configured dollar cap cannot account for both summarization and execution.
+Compaction is never persisted automatically. Automatic compaction and the following
+run share token, turn and configured-dollar reservations; usage is counted once.
+Manual `/compact` gets its own operation budget. Unknown rates or insufficient
+remaining allowance block the request before it reaches the provider.
+
+Both terminal modes and `serve` share one execution session and extension host.
+`/tasks`, `/task ID`, `/stop ID`, `/checkpoints`, and `/undo ID` work across turns.
+`/permissions execution` is a separate approved opt-in; `/permissions all` never
+grants arbitrary shell or external permissions. Entering plan mode or revoking
+execution stops attached shell jobs. Plan mode and read-only review revoke
+extension connections/hook trust; later use needs fresh trust. Undo requires a
+new exact-action approval and refuses files changed since the recorded edit.
 
 ## External editor
 

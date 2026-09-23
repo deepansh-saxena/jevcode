@@ -23,8 +23,8 @@ export async function chat(project: Project, settings: Pick<RunOptions, "permiss
   const sessionId = resume ?? (options.continue ? await latestSession(project) : undefined);
   const state: ChatState = { project, model, messages: sessionId ? await restoreSession(project, sessionId, model) : [],
     settings, planMode, runs: 0, compactions: 0, metrics: newChatMetrics(), autoCompact: options.autoCompact ?? false };
-  const app = new ChatController(state, options.services);
   const terminal = options.fullscreen ? await fullscreenTerminal(project) : new PlainTerminal(project);
+  const app = new ChatController(state, options.services);
   let controller: AbortController | undefined;
   let closed = false;
   terminal.onCancel = () => {
@@ -72,6 +72,8 @@ export async function chat(project: Project, settings: Pick<RunOptions, "permiss
               liveInput += typeof data.inputTokens === "number" ? data.inputTokens : 0;
               liveOutput += typeof data.outputTokens === "number" ? data.outputTokens : 0;
               if (options.fullscreen) activity("working");
+            } else if (event === "shell_output" && typeof data.text === "string") {
+              terminal.write(data.text);
             } else if (event === "llm_request") activity(`thinking: ${String(data.role)}`);
             else if (event === "turn_finished") {
               activity(String(data.status));

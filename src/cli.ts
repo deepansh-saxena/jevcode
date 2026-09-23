@@ -17,7 +17,7 @@ const help = `Jev Code - local coding harness
 
 Usage:
   jevcode [--cwd DIR] [--provider copilot|openai|api] [--model ID]
-          [--write] [--commands] [--plan] [--skill ID ...] [--specialist ID] [--resume UUID|--continue]
+          [--write] [--commands] [--execution] [--plan] [--skill ID ...] [--specialist ID] [--resume UUID|--continue]
           [--plain|--fullscreen] [--image WORKSPACE_FILE ...] [--auto-compact]
   jevcode chat [same options]
   jevcode serve [--cwd DIR] [--provider copilot|openai|api] [--model ID] [--plan]
@@ -29,13 +29,15 @@ Usage:
   jevcode models <copilot|openai>
   jevcode jev <setup|status|off|logout> [--cwd DIR]
   jevcode benchmark <suite.json> [--cwd DIR]
+  jevcode benchmark-code <suite.json> --allow-verifier-code [--preflight] [--cwd DIR]
   jevcode evaluate-guardrails <suite.json> [--cwd DIR]
   jevcode run [--cwd DIR] [--skill ID ...] [--specialist ID]
                [--provider copilot|openai|api] [--model ID]
-               [--write] [--commands] [--plan] [--image WORKSPACE_FILE ...] [--json] "task"
+               [--write] [--commands] [--execution] [--plan] [--image WORKSPACE_FILE ...] [--json] "task"
 
-Run is read-only by default. --write and --commands expose those tools,
+Run is read-only by default. --write, --commands, and --execution expose those tools,
 but EACH mutating action still requires interactive approval.
+--commands exposes configured commands; --execution separately enables arbitrary shell.
 Commands execute project code with your OS permissions, NOT in a sandbox.
 --plan forces read-only investigation and planning even when edit flags are present.
 In chat, /help lists commands; /permissions enables tools and /skills or /agents
@@ -43,6 +45,8 @@ can ask the coding model to create reusable capabilities after approval.
 --plain is the deterministic default. --fullscreen opts into a visual TTY editor.
 --image explicitly consents to sending validated image bytes to the coding provider.
 serve uses versioned newline-delimited JSON over stdin/stdout; never network listeners.
+benchmark-code executes trusted suite code; the verifier is NOT a security sandbox.
+--preflight validates fixture failures offline, without project configuration or provider access.
 
 Configuration: .jev/config.json
 Account credentials: ~/.jev-code/auth/ (private files, separate from this project).
@@ -58,6 +62,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       cwd: { type: "string" }, skill: { type: "string", multiple: true },
       specialist: { type: "string" }, write: { type: "boolean" },
       commands: { type: "boolean" }, json: { type: "boolean" },
+      execution: { type: "boolean" },
+      "allow-verifier-code": { type: "boolean" }, preflight: { type: "boolean" },
       plan: { type: "boolean" },
       provider: { type: "string" }, model: { type: "string" },
       resume: { type: "string" },
@@ -72,6 +78,44 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (values.resume && values.continue) throw new Error("Choose --resume or --continue, not both");
   if ((values.image?.length ?? 0) > MAX_IMAGES) throw new Error(`At most ${MAX_IMAGES} images per task`);
   const root = path.resolve(values.cwd ?? process.cwd());
+  if ((values.preflight || values["allow-verifier-code"]) && command !== "benchmark-code") {
+    throw new Error("--preflight and --allow-verifier-code are only supported by benchmark-code");
+  }
+  if (command === "benchmark-code") {
+    if (positionals.length !== 2) throw new Error("Usage: jevcode benchmark-code <suite.json> --allow-verifier-code [--preflight]");
+    if (!values["allow-verifier-code"]) throw new Error("Verifier code is NOT sandboxed. Review the suite and explicitly consent with --allow-verifier-code");
+    const suite = JSON.parse(await readText(path.resolve(root, positionals[1]!), 1_000_000));
+    const { benchmarkCode, preflightCodingBenchmark } = await import("./coding-evaluation.js");
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(new Error("Coding evaluation cancelled by user"));
+    process.on("SIGINT", abort);
+    process.on("SIGTERM", abort);
+    process.on("SIGHUP", abort);
+    try {
+      let result;
+      if (values.preflight) result = await preflightCodingBenchmark(suite, controller.signal, { allowVerifierCode: true });
+      else {
+        const project = await loadProject(root, { globalRoot: null });
+        if (values.provider) {
+          const provider = providerName(values.provider);
+          if (provider !== project.config.llm.provider && !values.model) {
+            throw new Error("Changing the benchmark provider also requires an explicit --model");
+          }
+          project.config.llm.provider = provider;
+        }
+        if (values.model) project.config.llm.model = values.model;
+        result = await benchmarkCode(project, suite, controller.signal, { allowVerifierCode: true });
+      }
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      if (result.cancelled) process.exitCode = 130;
+      else if ("valid" in result ? !result.valid : !result.validComparison) process.exitCode = 1;
+    } finally {
+      process.removeListener("SIGINT", abort);
+      process.removeListener("SIGTERM", abort);
+      process.removeListener("SIGHUP", abort);
+    }
+    return;
+  }
   if (command === "benchmark" || command === "evaluate-guardrails") {
     if (positionals.length !== 2) throw new Error(`Usage: jevcode ${command} <suite.json>`);
     const project = await loadProject(root);
@@ -146,7 +190,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const { chat } = await import("./chat.js");
     await chat(project, {
       skills: values.skill ?? [], ...(values.specialist ? { specialistId: values.specialist } : {}),
-      permissions: { write: values.write ?? false, commands: values.commands ?? false },
+      permissions: { write: values.write ?? false, commands: values.commands ?? false, execution: values.execution ?? false },
     }, values.resume, values.plan ?? false, {
       fullscreen: values.fullscreen ?? false, continue: values.continue ?? false,
       images: values.image ?? [], autoCompact: values["auto-compact"] ?? false,
@@ -161,11 +205,16 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const abort = (): void => controller.abort(new Error("Protocol terminated"));
     process.on("SIGINT", abort);
     process.on("SIGTERM", abort);
+    process.on("SIGHUP", abort);
     try {
       await serve(project, { skills: values.skill ?? [], ...(values.specialist ? { specialistId: values.specialist } : {}),
-        permissions: { write: values.write ?? false, commands: values.commands ?? false } },
+        permissions: { write: values.write ?? false, commands: values.commands ?? false, execution: values.execution ?? false } },
       { signal: controller.signal, planMode: values.plan ?? false });
-    } finally { process.removeListener("SIGINT", abort); process.removeListener("SIGTERM", abort); }
+    } finally {
+      process.removeListener("SIGINT", abort);
+      process.removeListener("SIGTERM", abort);
+      process.removeListener("SIGHUP", abort);
+    }
     return;
   }
   const task = positionals.slice(1).join(" ").trim();
@@ -174,6 +223,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const controller = new AbortController();
   const abort = (): void => controller.abort(new Error("Cancelled by user"));
   const log = await createEventLog(project.workspace.root, (event, data = {}) => {
+    if (event === "shell_output" && typeof data.text === "string") {
+      process.stderr.write(terminalSafe(data.text));
+    }
     if (["routing_fallback", "jev_error", "tool_error", "specialist_limit", "specialist_report_invalid", "guardrail_shadow"].includes(event)) {
       process.stderr.write(terminalSafe(`[${event}] ${JSON.stringify(data)}\n`));
     }
@@ -188,7 +240,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const result = await run(project, {
       task, images, skills: values.skill ?? [],
       ...(values.specialist ? { specialistId: values.specialist } : {}),
-      permissions: { write: values.write ?? false, commands: values.commands ?? false },
+      permissions: { write: values.write ?? false, commands: values.commands ?? false, execution: values.execution ?? false },
       planMode: values.plan ?? false,
       signal: controller.signal, emit: log.emit,
       async approve(action, signal) {

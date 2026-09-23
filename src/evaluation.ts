@@ -11,6 +11,7 @@ import { JevClient, scopeQuestion } from "./jev.js";
 import { readJevKey } from "./jev-key.js";
 import { errorMessage } from "./errors.js";
 import { skillContent, skillResource } from "./skill-catalog.js";
+import { summarizeReportedCosts } from "./budget.js";
 
 const taskSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
@@ -44,7 +45,7 @@ export function summarizeTrials(rows: { result: RunResult; acceptancePassed: boo
     medianJevMs: percentile(rows.map((row) => row.jevMs), 0.5),
     tokens: rows.reduce((sum, row) => sum + row.result.metrics.llm.inputTokens + row.result.metrics.llm.outputTokens +
       row.result.metrics.jev.inputTokens + row.result.metrics.jev.outputTokens, 0),
-    costUsd: null, costPerAcceptedTaskUsd: null,
+    ...summarizeReportedCosts(rows.map((row) => row.result.metrics), rows.filter((row) => row.acceptancePassed).length),
   };
 }
 

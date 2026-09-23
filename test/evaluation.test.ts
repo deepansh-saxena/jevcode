@@ -41,6 +41,13 @@ test("benchmark uses fresh fixtures, seeded paired trials, independent routing, 
   const second = JSON.parse(JSON.stringify(await benchmark(project, input, new AbortController().signal, model, { TYPESAFE_API_KEY: "fake" })));
   assert.deepEqual(output.trials.map((row: { variant: string; repetition: number }) => [row.variant, row.repetition]),
     second.trials.map((row: { variant: string; repetition: number }) => [row.variant, row.repetition]));
+  project.config.spend = { models: {
+    "openai-compatible/gpt-4.1-mini": { inputUsdPerMillion: 1, outputUsdPerMillion: 1 },
+  }, jev: { inputUsdPerMillion: 1, outputUsdPerMillion: 1 } };
+  const priced = JSON.parse(JSON.stringify(await benchmark(project, input, new AbortController().signal, model, { TYPESAFE_API_KEY: "fake" })));
+  assert.ok(Math.abs(priced.baseline.costUsd - 0.00006) < 1e-12);
+  assert.ok(Math.abs(priced.jev.costUsd - 0.000064) < 1e-12);
+  assert.equal(priced.jev.costPerAcceptedTaskUsd, priced.jev.costUsd / 2);
 });
 
 test("guardrail evaluation reports false decisions and outages separately without executing actions", async (t) => {

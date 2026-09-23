@@ -233,7 +233,9 @@ Supply explicit rates, indexed by **provider/model**, and optional Jev rates:
 
 These numbers illustrate syntax only; they are **not claimed provider prices**.
 Use your own reliable rates, including an explicit zero only when justified.
-The cap is per run, including its specialists/Jev, not a session or account cap.
+The cap is per run, including its specialists/Jev and preceding automatic
+compaction, not a session or account cap. Manual `/compact` has a separate
+operation budget. The shared chat/stdio controller accounts each request once.
 Model overrides require their own rates. Unknown rates block a request when
 `maxUsd` is set; without a cap, unknown/unreported usage keeps `costUsd: null`.
 `reportedCostUsd` separately reports the known subtotal, not a complete invoice.

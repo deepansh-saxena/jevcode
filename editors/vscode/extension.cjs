@@ -82,7 +82,7 @@ async function open(context) {
   connection.on("closed", (reason) => { status = reason; publish(); });
   connection.on("event", async (packet) => {
     try {
-      if (packet.event === "text" && typeof packet.data?.text === "string") publish(packet.data.text);
+      if ((packet.event === "text" || packet.event === "shell_output") && typeof packet.data?.text === "string") publish(packet.data.text);
       else if (packet.event === "approval_request" || packet.event === "question") {
         if (packet.runId !== connection.active || typeof packet.data?.requestId !== "string") throw new Error("Uncorrelated interaction");
         const details = packet.data.details;

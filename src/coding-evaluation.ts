@@ -10,6 +10,7 @@ import { Workspace, digest, excluded, readText } from "./workspace.js";
 import { BlockedError, errorMessage } from "./errors.js";
 import { readJevKey } from "./jev-key.js";
 import { verifierCheckSchema, verifierLimitsSchema, verifyCodingFixture, type Verification } from "./coding-verifier.js";
+import { summarizeReportedCosts } from "./budget.js";
 
 const fixturePath = z.string().max(240).refine((value) =>
   /^[a-zA-Z0-9_-][a-zA-Z0-9_./-]*$/.test(value) &&
@@ -195,7 +196,7 @@ function summarize(trials: CodingTrial[]) {
       trial.metrics.llm.inputTokens + trial.metrics.llm.outputTokens +
       trial.metrics.jev.inputTokens + trial.metrics.jev.outputTokens : 0), 0),
     incompleteUsageTrials: trials.filter((trial) => !trial.metrics || trial.metrics.usageIncompleteRequests > 0).length,
-    costUsd: null, costPerAcceptedTaskUsd: null,
+    ...summarizeReportedCosts(trials.map((trial) => trial.metrics), trials.filter((trial) => trial.acceptancePassed).length),
   };
 }
 

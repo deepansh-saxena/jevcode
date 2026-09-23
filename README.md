@@ -5,7 +5,8 @@ ChatGPT/Codex account login, or an OpenAI-compatible API key, plus optional Jev
 routing. Skills are reusable instructions; specialists are separate, bounded
 agent executions that reuse those skills.
 
-This is a local MVP, not a sandbox or a demonstrated cost/latency improvement.
+This is an independent local harness, not full Claude Code parity, a security
+sandbox, or a demonstrated cost/latency improvement.
 The coding LLM selects tools. Jev does not sit in front of every tool selection.
 
 ## Quick start
@@ -46,6 +47,8 @@ prompts, or chat messages.
 jevcode
 # Or allow approval-gated edits and configured commands:
 jevcode --write --commands
+# Full-screen multiline input (Ctrl-S submits), with separately approved shell:
+jevcode --fullscreen --write --execution
 # One-shot/scriptable mode remains available:
 jevcode run "Explain this project's architecture"
 jevcode run --skill testing "Identify missing regression tests"
@@ -55,8 +58,9 @@ jevcode run --write --commands "Fix the bug and run the configured tests"
 ```
 
 Runs are read-only by default. `--write` exposes editing tools; `--commands`
-exposes configured commands. **Each write or command still requires an interactive
-`yes` approval.** Noninteractive runs cannot approve mutations and return a
+exposes configured commands. `--execution` separately exposes arbitrary executable
+and shell commands, including attached background jobs. **Each write or command
+still requires a fresh exact-action approval.** Noninteractive runs cannot approve mutations and return a
 nonzero exit code when approval is needed. There is no blanket auto-approve flag.
 
 Use `--cwd /absolute/path/to/project` with `init`, `inspect`, `login`, or `run` to
@@ -84,7 +88,11 @@ Ctrl-C cancels the active turn and returns to the prompt; Ctrl-C at an idle prom
 exits. Messages typed while a turn runs are queued. They do not interrupt a tool
 or act as approvals: approval requires a new `yes` at the exact-action prompt.
 Use Ctrl-C to stop current work before sending a correction that must take effect
-immediately. This is a line-oriented terminal UI, not a full-screen editor.
+immediately. Plain mode remains the default; `--fullscreen` adds a transcript,
+status line, completion menu, and multiline editor. Enter inserts a newline and
+Ctrl-S submits, including at confirmation prompts. See
+[terminal and editor integration](docs/interactive.md) for controls and the
+real local stdio/VS Code client.
 
 | Chat command | Behavior |
 | --- | --- |
@@ -97,12 +105,12 @@ immediately. This is a line-oriented terminal UI, not a full-screen editor.
 | `/agents run ID TASK` | Explicitly run a specialist before the main agent for one task |
 | `/skills use ID...`, `/skills use none` | Set or clear pinned optional skills for subsequent tasks; mandatory skills always apply |
 | `/agents use ID`, `/agents use off` | Set or clear the pinned specialist; clearing a pin does not disable automatic selection |
-| `/permissions [read-only\|edit\|commands\|all]` | Inspect or replace enabled tool permissions in this chat; enabling tools requires fresh confirmation |
+| `/permissions [read-only\|edit\|commands\|all\|execution\|external]` | Enable tools after fresh confirmation; `all` grants only edits and configured commands, never shell or extensions |
 | `/plan [on\|off]` | Toggle or set read-only planning; leaving it requires confirmation when restoring enabled edit/command tools |
 | `/model [ID]`, `/models` | Show/change the session model or list the bundled account catalog; changing model clears context after confirmation |
 | `/context` | Estimate current context characters, including native history; not a token count |
 | `/compact [focus]` | Ask the coding model to summarize old context, keeping the latest user task; consumes tokens |
-| `/usage`, `/cost` | Show cumulative model/Jev usage and timing since startup; dollar costs remain unknown |
+| `/usage`, `/cost` | Show cumulative usage, timing, and cost at explicitly configured rates; unknown costs stay null |
 | `/config`, `/commands` | Inspect current session configuration or configured executable commands |
 | `/doctor` | Check local registries and credential availability; no live model request |
 | `/reload` | Reload skills, specialists, and root `AGENTS.md`, retaining session settings |
@@ -111,12 +119,21 @@ immediately. This is a line-oriented terminal UI, not a full-screen editor.
 | `/save` | Ask before writing a private snapshot; prints its resume UUID |
 | `/sessions`, `/resume` | List saved snapshot UUIDs without displaying transcripts |
 | `/resume UUID` | Load a saved snapshot; confirm before replacing current unsaved context |
+| `/continue`, `/name NAME` | Restore the latest explicit snapshot or label the next save |
+| `/auto-compact on\|off` | Opt into model summaries before context-heavy tasks; shares the task's token/turn/spend ledger |
+| `/tasks`, `/task ID`, `/stop ID` | List, inspect, or stop attached work across turns |
+| `/checkpoints`, `/undo ID` | Inspect session-memory file checkpoints or approve a hash-checked undo |
+| `/mcp`, `/hooks`, `/plugins` | Discover configured extensions; each executable integration requires separate session-only trust |
+| `/attach IMAGE`, `/detach` | Approve an actual image for the next coding-model task or discard attachments |
+| `/editor`, `/diff`, `/export NEW_FILE` | Compose in an explicitly configured editor, inspect tracked Git changes, or approve transcript export |
 | `/exit`, `/quit` | Leave the chat |
 
 Press Tab to complete built-in commands, installed skill commands, and IDs after
 `/skills show|use|run` or `/agents show|use|run`. Command history stays in memory.
 `--plan` starts chat or a one-shot run in planning mode, overriding `--write` and
-`--commands`. Plan mode is enforced by withholding mutating tools, not just a prompt.
+`--commands` and `--execution`. Entering plan mode also stops attached shell jobs
+and revokes extension connections/hook trust. Plan mode is enforced by withholding
+mutating tools, not just a prompt.
 Queued `yes` messages cannot enable permissions or approve actions.
 
 For example, no restart or manual manifest authoring is necessary:
@@ -136,8 +153,9 @@ Answer the permission and exact-definition approval prompts as they appear.
 The model authors definitions from your description and inspected project context;
 Jev routes among installed candidates. It does not write the definitions.
 Creation is user-directed, not silent automatic accumulation after every task.
-This follows the public Claude Code skill/subagent workflow in spirit, not its
-file format or complete feature set.
+This follows the public Claude Code skill/subagent workflow in spirit.
+Supported `SKILL.md` and `.claude` frontmatter is intentionally a strict subset;
+unsupported active behavior is rejected, not silently emulated.
 
 `jevcode --resume UUID` resumes at startup. Saving is opt-in: snapshots contain
 raw conversations, accessed file contents, and native model history, but no
@@ -149,7 +167,8 @@ approvals: current instructions, configuration, permissions, and file hashes
 remain authoritative. Missing results from cancelled/blocked batches are marked
 as unknown rather than rerun. Shared turn/token/time limits reset per user task;
 the bounded conversation survives until `/clear` or exit.
-`/compact` is explicit, not automatic semantic compaction. It retains current
+`/compact` is explicit; `/auto-compact on` or `--auto-compact` opts into automatic
+summaries before context-heavy turns. Compaction retains current
 system instructions and the latest user task, replacing older exchanges with a
 marked historical summary. Summaries can omit details; prior approvals and file
 hashes must not be reused. A failed, truncated, or oversized summary leaves the
@@ -159,13 +178,20 @@ they reset on process restart and are not restored from snapshots.
 
 ### CLI parity scope
 
-This is an independent harness, **not full Claude Code parity**. Missing surfaces
-include MCP servers, plugins/hooks, Agent Skills `SKILL.md` import, personal/global
-capability catalogs, background/parallel agents, arbitrary shell sessions, file
-undo/checkpoints, image input, IDE integration, and a full-screen TUI. Commands
-listed above are implemented; unsupported commands fail explicitly rather than
-acting as placeholders. OS-level sandboxing, automated coding-task evaluation,
-and demonstrated Jev savings also remain outstanding.
+Implemented surfaces include standard/personal skill catalogs, local plugins,
+MCP stdio/Streamable HTTP, opt-in hooks, read-only parallel specialists, attached
+shell jobs, harness-edit undo, real image input, plain/full-screen terminals, and
+a JSONL protocol with a small VS Code development client. The coding benchmark
+now measures executable fixture acceptance rather than answer text alone.
+
+See [extensions](docs/extensions.md), [execution and budgets](docs/execution.md),
+[terminal/editor integration](docs/interactive.md), and
+[coding evaluation](docs/evaluation.md). Limits remain explicit: no marketplace,
+MCP OAuth or full MCP protocol surface, nested agents, persistent jobs/undo,
+arbitrary Claude frontmatter compatibility, or published IDE extension.
+Docker isolation is opt-in and fake-driver tested, not a verified deployment
+sandbox. The verifier is not a security sandbox. Representative held-out
+quality/cost/latency evidence and broad platform hardening remain outstanding.
 
 ## Account login and provider selection
 
@@ -276,8 +302,9 @@ fields and invalid settings fail explicitly. Model API keys are read from the
 environment variable named by `llm.apiKeyEnv` or `jev.apiKeyEnv`.
 
 `AGENTS.md` at the workspace root is loaded as mandatory project guidance.
-No parent-directory instructions, external extensions, or remote skills are
-automatically discovered. Nested `AGENTS.md` auto-loading is not implemented.
+No parent-directory or nested `AGENTS.md` is automatically loaded. Supported
+project `.jev`/`.claude` and personal `~/.jev-code` catalogs are discovered
+passively; discovery never executes commands or downloads remote skills.
 
 ### Skills
 
@@ -301,8 +328,9 @@ deduplicated and subject to a combined character budget; overflowing it is an
 explicit error rather than silently dropping mandatory instructions.
 
 Optional `applicability` text supplies additional routing criteria. A `resources`
-array lists trusted reference files under `.jev/skills/`; their contents load
-only with the selected skill and count against the same instruction budget.
+array lists trusted reference files. Main agents load selected references
+progressively with `load_skill_resource`; constrained specialists receive them
+eagerly, under the same instruction budget.
 `commandIds` references existing configured commands as skill scripts; it does
 not execute them, enable command tools, or bypass per-action approval. Arbitrary
 script paths and remote skill installation are not supported.
@@ -316,7 +344,12 @@ registry-authoring tools, not general access to protected `.jev/` state.
 New definitions are usable in the same task and loaded in subsequent sessions.
 Manual edits are picked up with `/reload` or restart. Automatic updating/deleting
 of existing definitions and mandatory-skill creation are not exposed to the model.
-The existing JSON manifest format remains canonical; `.claude/` files are not imported.
+JSON manifests remain backward compatible. Standard
+`.jev/skills/NAME/SKILL.md`, supported `.claude/skills`, `.claude/commands`,
+`.claude/agents`, and personal `~/.jev-code/skills`/agents are also supported.
+Project definitions take precedence over personal/plugin definitions.
+User-only/model-only invocation gates and literal argument substitution are
+enforced; shell interpolation never runs. See [supported formats](docs/extensions.md).
 
 ### Specialists
 
@@ -471,13 +504,19 @@ action. Use only workspaces and content permitted for the configured providers.
 | `write_file` | Approved new-file creation or whole-file replacement with expected hash |
 | `replace_text` | Approved replacement of exactly one occurrence with expected hash |
 | `run_command` | Approved execution of a fixed command ID from configuration |
+| `exec_command` | Separately enabled and approved executable/args or shell, optionally attached in the background |
+| `task_list`, `task_read`, `task_wait`, `task_stop` | Inspect, await, or stop attached tasks without launching new work |
+| `list_checkpoints`, `undo_edit` | Session-memory harness edit history and approved conflict-safe undo |
 | `list_capabilities` | Discover installed skill and specialist metadata |
 | `load_skill` | Load a skill into the main task's bounded instructions |
-| `delegate_task` | Run a sequential, isolated specialist within shared limits and permissions |
+| `load_skill_resource` | Load a selected skill's declared supporting resource under the same budget |
+| `delegate_task`, `delegate_parallel` | Sequential specialists or read-only concurrent/background specialists within shared budgets |
+| `ask_user` | Request clarification, never approval; unavailable to specialists/background runs |
+| `mcp__...` | Trusted external server tools; every call needs approval even when advertised read-only |
 | `create_skill`, `create_specialist` | Main-agent-only creation of new, reviewed project capabilities; edit permission required |
 
 File tools reject absolute paths, parent traversal, symlinks, and hard-linked
-files. Built-in protected paths include `.jev`, `.jev-code`, `.git`, `.env*`, common credential
+files. Built-in protected paths include `.jev`, `.claude`, `.jev-code`, `.git`, `.env*`, common credential
 files/directories, and `node_modules`; `protectedPaths` adds file/directory prefixes.
 The agent cannot edit `AGENTS.md` through file tools.
 
@@ -486,18 +525,21 @@ file, and publish the replacement atomically. New files cannot overwrite an
 existing file. These checks protect ordinary local workflows; they are not an
 OS-enforced boundary against hostile concurrent filesystem changes.
 
-**Commands are privileged and not sandboxed.** No arbitrary shell strings or
-model-supplied command arguments are accepted, but a configured `npm test` can
+**Host commands are privileged and not sandboxed.** Configured `run_command`
+accepts no model-supplied arguments; separately enabled `exec_command` accepts
+explicit executable/arguments or shell text. Even a configured `npm test` can
 execute arbitrary project scripts with your OS permissions, access other paths,
 or use the network. Review the exact command and project before approval. A small
 environment allowlist avoids forwarding provider keys, but cannot prevent a
 command from reading credentials elsewhere on the machine. Use an external
-container/VM when isolation is required.
+container/VM when isolation is required. The optional Docker backend requires an
+already-installed trusted image and never falls back to host execution. It mounts
+the entire workspace writable, including paths protected by file tools.
 
 Commands have bounded output and deadlines. On macOS/Linux the harness terminates
 the spawned process group on cancellation/exit; deliberately detached descendants
 are not an enforceable containment boundary. Windows descendant cleanup is not
-implemented or validated.
+supported; execution fails closed on Windows.
 
 ## Limits, events, and results
 
@@ -517,19 +559,25 @@ excerpting, not an LLM-generated summary, and adds no model requests.
 `context_pruned` events contain only sizes and counts, never file contents.
 The hard limit still applies if the retained context cannot fit.
 
-Token limits are checked after each response, so they can overshoot by one
-in-flight request. `maxOutputTokens` is forwarded where the provider supports it;
+Requests synchronously reserve conservative token/turn allowances, then reconcile
+reported usage; parallel specialists receive bounded shares. Provider reports
+can still exceed a reservation for an in-flight request, which stops the run.
+`maxOutputTokens` is forwarded where the provider supports it;
 the pinned Codex subscription adapter does not enforce this output-token cap.
-Shared reported-token, context, turn, and deadline limits still apply. There is
-no hard dollar-spend cap.
+Explicit `spend.models` and `spend.jev` rates support a reported-dollar `maxUsd`
+cap; unknown rates block capped requests. This is not a provider billing limit.
+Automatic compaction shares the following run's ledger; manual `/compact` has
+its own operation budget. Capped image requests are refused because no verified
+provider image-token upper bound is available. See [budget semantics](docs/execution.md).
 
 Subscription transports can have internal retries (the pinned Codex transport can
 retry up to three times) within the request deadline, even though Jev Code disables
 retries where the library honors that option. Metrics count harness-level requests,
 not every hidden transport attempt. Failed attempts may incur unreported usage:
 `usageIncompleteRequests` flags harness requests whose usage is unknown.
-`costUsd` is `null`; subscription allowances and premium requests are not mapped
-to API dollar pricing. No billing or quota tracker is implemented.
+`costUsd` is `null` when usage/rates are unknown; `reportedCostUsd` retains the
+known subtotal. Subscription allowances and premium requests are never guessed
+as API dollar prices. No provider billing or quota tracker is implemented.
 
 ```sh
 jevcode run --json "Explain the test setup"
@@ -548,24 +596,37 @@ persist task bodies, file contents, tool arguments/results, or final answers.
 Error messages can include file paths. Logs have no automatic retention policy;
 delete specific old log files according to your requirements.
 
-Automatic semantic compaction and runtime model-tier routing are not implemented;
-explicit `/compact` and session `/model` selection are available.
+Automatic semantic compaction is opt-in; runtime model-tier routing is not implemented.
+Explicit `/compact` and session `/model` selection are available.
 Read-only output pruning is explicit and bounded; irreducible context still stops
 at the configured limit rather than silently dropping instructions or mutation
-outcomes. The terminal remains line-oriented, not a full-screen coding IDE.
+outcomes. Plain and optional full-screen modes share the same controller and
+execution/extension services as the stdio editor protocol.
 
 ## Reproducible evaluation
 
 ```sh
 jevcode benchmark examples/benchmark.json > benchmark-results.json
 jevcode evaluate-guardrails examples/guardrails.json > guardrail-results.json
+# Offline, no initialized workspace or credentials needed:
+jevcode benchmark-code examples/coding-benchmark.json --allow-verifier-code --preflight
+# Real model/Jev comparison with executable checks:
+jevcode benchmark-code examples/coding-benchmark.json --allow-verifier-code > coding-results.json
 ```
 
-These commands make real coding/Jev requests and consume account allowance.
+Except for coding `--preflight`, these commands make real coding/Jev requests and consume account allowance.
 They require Jev sharing consent and a key. The included suites are tiny
 **development examples**, not release evidence or calibrated security tests.
 
-Benchmark suites specify a `split` (`development` or `heldout`), independent
+`benchmark-code` runs fresh paired fixtures with suite-owned skills/instructions,
+exact writable/required-changed paths, fixed external checks, and exact expected
+initial assertion failures. Crashes, wrong patches, empty regression tests,
+budget-exhausted runs, and confident answers alone cannot count as coding success.
+Verifier consent is mandatory: its empty-env Node child and VM are **not a security
+sandbox**. Run only trusted suites/code or use external isolation.
+See [coding evaluation](docs/evaluation.md) for the full acceptance contract.
+
+Legacy read-only `benchmark` suites specify a `split` (`development` or `heldout`), independent
 `feature` (`skills`, `delegation`, or `routing`), repeat count, random seed, and
 tasks with embedded fixture files. Each trial runs in a fresh temporary workspace
 with the same config, registries, instructions, and read-only tools. The seeded

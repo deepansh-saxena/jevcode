@@ -10,6 +10,7 @@ import { compactConversation, contextSize } from "./context.js";
 import { handleExtensionCommand, type ExtensionHost } from "./extensions.js";
 import { readImage, requireImageSupport, MAX_IMAGES, type ImageAttachment } from "./media.js";
 import { exportTranscript, workspaceDiff } from "./chat-files.js";
+import { RunBudget } from "./budget.js";
 
 const commands: Record<string, string> = {
   help: "Show commands; Tab completes commands and installed skill names",
@@ -18,7 +19,12 @@ const commands: Record<string, string> = {
   new: "Alias for /clear",
   skills: "List skills; show ID | use ID... | use none | run ID [task] | create DESCRIPTION",
   agents: "List specialists; show ID | use ID | use off | run ID TASK | create DESCRIPTION",
-  permissions: "Show permissions, or set read-only | edit | commands | all | external (fresh approval to enable)",
+  permissions: "Show permissions, or set read-only | edit | commands | all | execution | external (fresh approval to enable)",
+  tasks: "List attached shell and specialist tasks",
+  task: "Read bounded output/results for a task ID",
+  stop: "Stop an attached task ID",
+  checkpoints: "List in-memory checkpoints for harness file edits",
+  undo: "Review and approve undo of a checkpoint ID; refuses changed files",
   plan: "Toggle planning, or set on | off; planning disables all writes and commands",
   model: "Show model, or set ID for this chat (changing model clears context after confirmation)",
   models: "List bundled account-model IDs, not live account availability",
@@ -63,18 +69,27 @@ export interface ChatState {
   attachments?: ImageAttachment[];
   name?: string;
   autoCompact?: boolean;
+  costUnknown?: boolean;
 }
 
 export function newChatMetrics(): RunResult["metrics"] {
   return { durationMs: 0, approvalWaitMs: 0, turns: 0, toolCalls: 0, llm: { inputTokens: 0, outputTokens: 0 },
-    jev: { inputTokens: 0, outputTokens: 0 }, usageIncompleteRequests: 0, costUsd: null };
+    jev: { inputTokens: 0, outputTokens: 0 }, usageIncompleteRequests: 0, costUsd: null, reportedCostUsd: 0 };
 }
 
-export function recordRun(state: ChatState, result: RunResult): void {
+function recordCost(state: ChatState, costUsd: number | null, reportedCostUsd: number): void {
+  state.costUnknown ||= costUsd === null;
+  state.metrics.reportedCostUsd = (state.metrics.reportedCostUsd ?? 0) + reportedCostUsd;
+  state.metrics.costUsd = state.costUnknown ? null : state.metrics.reportedCostUsd;
+}
+
+export function recordRun(state: ChatState, result: RunResult,
+  priorBudget = { turns: 0, reportedCostUsd: 0 }): void {
   state.runs++;
   for (const key of ["durationMs", "approvalWaitMs", "turns", "toolCalls", "usageIncompleteRequests"] as const) {
-    state.metrics[key] += result.metrics[key];
+    state.metrics[key] += result.metrics[key] - (key === "turns" ? priorBudget.turns : 0);
   }
+  recordCost(state, result.metrics.costUsd, Math.max(0, (result.metrics.reportedCostUsd ?? 0) - priorBudget.reportedCostUsd));
   for (const source of ["llm", "jev"] as const) {
     state.metrics[source].inputTokens += result.metrics[source].inputTokens;
     state.metrics[source].outputTokens += result.metrics[source].outputTokens;
@@ -97,6 +112,7 @@ export interface CommandIO {
   write: (text: string) => void;
   confirm: (prompt: string, signal?: AbortSignal) => Promise<boolean>;
   signal: AbortSignal;
+  budget?: RunBudget;
   editor?: () => Promise<string>;
 }
 
@@ -147,7 +163,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       print({
         provider: project.config.llm.provider, model: project.config.llm.model, jev: project.config.jev.mode,
         messages: state.messages.length, planMode: state.planMode,
-        permissions: state.planMode ? { write: false, commands: false } : state.settings.permissions,
+        permissions: state.planMode ? { write: false, commands: false, execution: false, external: false } : state.settings.permissions,
         pinnedSkills: state.settings.skills ?? [], pinnedSpecialist: state.settings.specialistId ?? null,
         limits: project.config.limits,
       });
@@ -198,8 +214,18 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     }
     case "permissions": {
       if (!argument) { print({ configured: state.settings.permissions, planMode: state.planMode, approval: "Every mutation requires exact-action approval." }); return handled; }
-      const mode = z.enum(["read-only", "edit", "commands", "all", "external"]).safeParse(argument);
-      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all|external");
+      const mode = z.enum(["read-only", "edit", "commands", "all", "execution", "external"]).safeParse(argument);
+      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all|execution|external");
+      if (mode.data === "execution") {
+        if (state.planMode) throw new Error("Execution permission cannot be enabled in plan mode");
+        if (!await io.confirm("Enable arbitrary executable and shell tools? Host execution is NOT sandboxed and can access files and the network with your OS privileges. Every launch still needs exact-action approval. Type yes: ")) {
+          io.write("Permissions unchanged.\n"); return handled;
+        }
+        io.signal.throwIfAborted();
+        state.settings.permissions = { ...state.settings.permissions, execution: true };
+        io.write("Execution permission enabled; no command is preapproved.\n");
+        return handled;
+      }
       if (mode.data === "external") {
         if (state.planMode) throw new Error("External permission cannot be enabled in plan mode");
         if (!await io.confirm("Enable external extension controls? Unsandboxed MCP and hooks each require separate trust; every MCP call requires approval. Type yes: ")) return handled;
@@ -223,8 +249,8 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     case "plan": {
       if (argument && argument !== "on" && argument !== "off") throw new Error("Usage: /plan [on|off]");
       const enabled = argument ? argument === "on" : !state.planMode;
-      if (!enabled && state.planMode && (state.settings.permissions.write || state.settings.permissions.commands)) {
-        if (!await io.confirm("Leave plan mode and restore the configured edit/command tools? Type yes: ")) {
+      if (!enabled && state.planMode && Object.values(state.settings.permissions).some(Boolean)) {
+        if (!await io.confirm("Leave plan mode and restore the configured edit/command/execution/external permissions? External services need fresh trust. Type yes: ")) {
           io.write("Plan mode unchanged.\n"); return handled;
         }
       }
@@ -273,6 +299,8 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     }
     case "compact": {
       const started = performance.now();
+      const budget = io.budget ?? new RunBudget(project.config);
+      const previousCost = budget.reportedCostUsd;
       try {
         const compacted = await compactConversation(project, state.model, state.messages, argument,
           AbortSignal.any([io.signal, AbortSignal.timeout(project.config.llm.timeoutMs)]), (usage) => {
@@ -282,11 +310,12 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
           }, () => {
             state.metrics.turns++;
             state.metrics.usageIncompleteRequests++;
-          });
+          }, budget);
         state.messages = compacted.messages;
         state.compactions++;
         io.write(`Compacted context: ${compacted.beforeChars} -> ${compacted.afterChars} characters. Summary may omit details; reread files before editing. Not saved automatically.\n`);
       } finally {
+        recordCost(state, budget.costUsd, budget.reportedCostUsd - previousCost);
         state.metrics.durationMs += Math.round(performance.now() - started);
       }
       return handled;
@@ -295,7 +324,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       noArguments();
       print({ runs: state.runs, compactions: state.compactions, ...state.metrics,
         machineMs: Math.max(0, state.metrics.durationMs - state.metrics.approvalWaitMs),
-        note: "Usage since this chat started, including failures and compaction; not restored from snapshots. Dollar costs and subscription allowance mapping are unknown." });
+        note: "Usage since this chat started, including failures and compaction; not restored from snapshots. Costs use only explicitly configured rates. Null means incomplete/unknown cost; reportedCostUsd is the known subtotal, not a provider bill or subscription allowance." });
       return handled;
     case "reload":
       noArguments();

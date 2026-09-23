@@ -58,6 +58,7 @@ test("automatic semantic compaction is opt-in, accounts usage and preserves fail
   assert.equal(state.autoCompact, undefined);
   await handleChatCommand("/auto-compact on", state, io(true));
   const app = new ChatController(state);
+  t.after(() => app.close());
   await app.submit("Continue", { ...io(false), event() {}, askUser: async () => "answer" });
   assert.equal(state.compactions, 1);
   assert.equal(state.runs, 1);

@@ -205,7 +205,7 @@ export class ExtensionHost {
     await Promise.allSettled([...this.activeHooks]);
     const results = await Promise.allSettled(connections.map((connection) => connection.close()));
     const failure = results.find((result) => result.status === "rejected");
-    if (failure?.status === "rejected") throw new Error("An MCP connection failed to clean up");
+    if (failure?.status === "rejected") throw new Error("An MCP connection failed to clean up", { cause: failure.reason });
     this.lifetime = new AbortController();
   }
 

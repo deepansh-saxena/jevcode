@@ -19,6 +19,16 @@ npm run build
 node dist/cli.js benchmark-code examples/coding-benchmark.json --allow-verifier-code
 ```
 
+For offline fixture validation without project configuration, model credentials,
+Jev, or provider calls:
+
+```sh
+jevcode benchmark-code examples/coding-benchmark.json --allow-verifier-code --preflight
+```
+
+Preflight prints each exact initial check outcome. Invalid reproduction/comparison
+reports exit with status 1; cancellation exits with status 130.
+
 **Trust warning:** verification executes suite-authored and model-written
 JavaScript with your OS permissions. A temporary directory, a separate process,
 and `node:vm` are **not a security sandbox**. The flag is mandatory even for
@@ -128,8 +138,12 @@ old-space limit, **not a hard process-memory quota**; named temporary roots are
 cleaned after completion or cancellation.
 
 Token totals are **observed** usage; incomplete provider usage is counted.
-`costUsd` and `costPerAcceptedTaskUsd` are `null` (unknown), not zero. Subscription
-or unpriced routing usage must not be presented as measured dollar savings.
+With explicit `spend` rates and complete reported usage, `costUsd` sums every
+trial's configured-rate cost, including failed trials; `costPerAcceptedTaskUsd`
+divides that total by the accepted count. With missing rates/usage, both stay
+`null` (unknown), not zero. `reportedCostUsd` is only the known subtotal. Zero
+accepted tasks have no cost-per-accepted value. Subscription or unpriced routing
+usage must not be presented as measured dollar savings.
 Compare paired acceptance first, then latency and usage; small public toy
 fixtures and a few repeats are not statistically reliable superiority claims.
 

@@ -5,6 +5,18 @@ import type { CodingModel, Message, ToolSpec } from "./llm.js";
 import { requireImageSupport } from "./media.js";
 
 export interface Reservation { settle(usage: Usage): void; fail(): void }
+export function summarizeReportedCosts(metrics: readonly ({
+  costUsd: number | null; reportedCostUsd?: number; usageIncompleteRequests: number;
+} | null)[], accepted: number) {
+  const complete = metrics.length > 0 && metrics.every((item) => item?.costUsd != null && item.usageIncompleteRequests === 0);
+  const costUsd = complete ? metrics.reduce((sum, item) => sum + (item?.costUsd ?? 0), 0) : null;
+  return {
+    costUsd,
+    reportedCostUsd: metrics.reduce((sum, item) => sum + (item?.reportedCostUsd ?? item?.costUsd ?? 0), 0),
+    costPerAcceptedTaskUsd: costUsd !== null && accepted > 0 ? costUsd / accepted : null,
+  };
+}
+
 interface Ledger { cost: number; unknown: boolean; incomplete: number; turns: number }
 type Rate = NonNullable<Config["spend"]["jev"]>;
 

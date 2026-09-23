@@ -2,6 +2,7 @@ import { LimitError } from "./errors.js";
 import { isUserTask, type CodingModel, type Message, type ToolSpec } from "./llm.js";
 import type { Project } from "./registry.js";
 import type { Usage } from "./http.js";
+import { RunBudget, reserveModelRequest } from "./budget.js";
 import { contextMessages } from "./media.js";
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -99,6 +100,7 @@ export function pruneContext(
 export async function compactConversation(
   project: Project, model: CodingModel, messages: Message[], focus: string, signal: AbortSignal,
   onUsage: (usage: Usage) => void, onRequest?: () => void,
+  budget = new RunBudget(project.config),
 ): Promise<{ messages: Message[]; beforeChars: number; afterChars: number }> {
   if (!messages.some((message) => message.role === "assistant")) throw new Error("No conversation to compact");
   const request: Message[] = messages.map((message) => message.role === "tool" ? { ...message } : message);
@@ -119,9 +121,19 @@ export async function compactConversation(
     throw new LimitError("Conversation plus compaction instructions exceeds the context limit; original conversation retained");
   }
   signal.throwIfAborted();
-  onRequest?.();
-  const completion = await model.complete(request, [], project.config.llm.model, signal);
+  budget.assertCompatible(project.config);
+  const reservation = reserveModelRequest(budget, model, project.config.llm.model,
+    request, [], project.config.llm.maxOutputTokens);
+  let completion: Awaited<ReturnType<CodingModel["complete"]>>;
+  try {
+    onRequest?.();
+    completion = await model.complete(request, [], project.config.llm.model, signal);
+  } catch (error) {
+    reservation.fail();
+    throw error;
+  }
   onUsage(completion.usage);
+  reservation.settle(completion.usage);
   signal.throwIfAborted();
   if (completion.usage.inputTokens + completion.usage.outputTokens >= project.config.limits.maxTokens) {
     throw new LimitError("Compaction reached its token budget; original conversation retained");

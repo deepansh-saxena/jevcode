@@ -147,6 +147,32 @@ test("confident answers, wrong patches, broken syntax, and empty generated tests
   }
 });
 
+test("coding cost summaries use configured rates only and retain a known subtotal when routing is unpriced", async (t) => {
+  const project = await projectWithJev(t);
+  const suite = await example();
+  suite.tasks = [suite.tasks[0]!];
+  suite.repetitions = 1;
+  project.config.spend = { models: {
+    "openai-compatible/gpt-4.1-mini": { inputUsdPerMillion: 1, outputUsdPerMillion: 2 },
+  }, jev: { inputUsdPerMillion: 3, outputUsdPerMillion: 4 } };
+  const options = { ...consent, env, model: editingModel(suite) };
+  const report = await benchmarkCode(project, suite, signal(), options);
+  assert.equal(report.validComparison, true);
+  for (const variant of ["baseline", "jev"] as const) {
+    const trial = report.trials.find((trial) => trial.variant === variant)!;
+    assert.ok(report[variant].costUsd! > 0);
+    assert.equal(report[variant].costUsd, trial.metrics!.costUsd);
+    assert.equal(report[variant].reportedCostUsd, report[variant].costUsd);
+    assert.equal(report[variant].costPerAcceptedTaskUsd, report[variant].costUsd);
+  }
+  delete project.config.spend.jev;
+  const unknown = await benchmarkCode(project, suite, signal(), options);
+  assert.ok(unknown.baseline.costUsd! > 0);
+  assert.equal(unknown.jev.costUsd, null);
+  assert.equal(unknown.jev.costPerAcceptedTaskUsd, null);
+  assert.ok(unknown.jev.reportedCostUsd > 0);
+});
+
 test("suite-owned skills load when the OS temporary directory has a symlink ancestor", {
   skip: process.platform === "win32",
 }, async (t) => {

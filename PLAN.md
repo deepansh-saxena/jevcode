@@ -1,10 +1,10 @@
 # Jev-assisted coding harness
 
-Status: interactive standalone TypeScript harness implemented with Jev routing,
-private session save/resume, capability authoring, interactive command controls,
-and evaluation tooling. Codex chat/tool and minimal live Jev routing smoke runs
-have completed. Representative held-out evaluation and broader deployment gates
-remain outstanding.
+Status: standalone TypeScript harness implemented with Jev routing, standard and
+model-authored capabilities, trusted extensions, guarded execution/undo,
+plain/full-screen terminals, images, a stdio/VS Code client, and executable coding
+evaluation. Codex chat/tool and minimal live Jev routing smoke runs have completed.
+Representative held-out evaluation and broader deployment gates remain outstanding.
 
 ## Implementation snapshot
 
@@ -31,12 +31,14 @@ skill/delegation switches, per-user-task routing, and mutation-guardrail shadow
 evaluation. Reproducible read-only baseline/Jev trials and labeled scope-check
 evaluation are available through CLI commands and development examples.
 
-This is not completion of every release gate below. Commands are not sandboxed;
-OS-enforced filesystem/network isolation, automatic semantic compaction, dollar-spend
-policy, held-out calibration, and demonstrated savings remain outstanding.
-Model routing, metadata caching, and parallel specialists remain deferred under
-stage 6 until a measured bottleneck justifies them. The benchmark's literal
-answer checks do not establish full coding-task correctness.
+This is not completion of every release gate below. Host commands and verifier
+code are not sandboxed. Optional Docker execution is fail-closed and tested with
+a synthetic driver, not a live deployment. Shared request reservations,
+configured-rate spend caps, automatic compaction and read-only parallel
+specialists are implemented. Held-out calibration, runtime model routing,
+metadata caching, broad platform hardening, and demonstrated savings remain
+outstanding. Executable coding checks measure the supplied fixtures, not general
+coding correctness.
 
 The runtime now prunes older read-only tool output into explicitly marked
 excerpts under context pressure. It preserves instructions, native assistant
@@ -67,11 +69,20 @@ Implemented in this expansion:
 - Fresh confirmation for permission elevation, restoring privileged tools after
   planning, and replacing unsaved context; queued input never grants approval.
 
-Remaining parity work: interoperable `SKILL.md` and personal catalogs, MCP,
-plugins/hooks, background/parallel agents, richer shell/process control, undo
-checkpoints, images, IDE integration, and a full-screen UI. These need separate
-implementation and permission/lifecycle design, not placeholder slash commands.
-The coding-fixture benchmark with executable acceptance checks is still missing.
+The full CLI expansion also includes:
+
+- Strict supported `SKILL.md`/`.claude` formats and personal catalogs, invocation
+  gates, progressive resources, local plugins, MCP stdio/HTTP and opt-in hooks.
+- Separate shell/external permissions, attached processes, read-only concurrent
+  specialists, shared token/turn/dollar reservations and session-memory undo.
+- Optional full-screen input, real images, explicit editor/export/diff, automatic
+  compaction, a correlated JSONL protocol and an actual VS Code development client.
+- Repeated paired coding fixtures, fixed executable acceptance checks, exact
+  initial bug reproduction and a credential-free offline preflight CLI.
+
+Remaining parity work includes marketplace distribution, MCP OAuth/full protocol
+support, nested delegation, persistent jobs/undo, broader frontmatter support and
+production isolation/platform assurance. These are not placeholder commands.
 
 See [README.md](README.md) for setup, actual behavior, data-sharing implications,
 and current limitations. The stages and release gates below remain the roadmap.
@@ -156,8 +167,8 @@ result distinguishes completed, failed, blocked, and cancelled work.
 
 ## Skill and specialist registries
 
-Start with local, explicitly trusted manifests. Remote installation and automatic
-discovery are outside the MVP.
+Use local, explicitly trusted manifests. Supported project and personal catalogs
+are discovered passively; remote installation and marketplace discovery are not implemented.
 
 | Registry | Minimum metadata |
 | --- | --- |
@@ -175,10 +186,12 @@ allowlist. Their input contains only the task, necessary evidence, constraints,
 and expected output. Their result includes status, findings or changes, supporting
 evidence, validation performed, and unresolved issues.
 
-For the MVP, allow one specialist at a time, no nested delegation, and no concurrent
-writes to the same workspace. Give every specialist a bounded task, deadline, and
-budget drawn from the overall session budget. Cancellation propagates to active
-children and their processes. Read-only parallel work can be added later.
+Sequential specialists may inherit approved write tools. Concurrent/background
+specialists are statically restricted to file list/read/search, with no nested
+delegation or interactive approvals. Every specialist has a bounded task,
+deadline, and budget drawn from the parent run; cancellation propagates and
+unfinished specialists are joined before the run returns. Approved shell jobs
+may remain attached across successful chat turns, never across session exit.
 
 ## Jev routing
 
