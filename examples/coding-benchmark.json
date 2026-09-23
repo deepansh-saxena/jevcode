@@ -1,0 +1,121 @@
+{
+  "version": 1,
+  "split": "development",
+  "feature": "routing",
+  "repetitions": 3,
+  "seed": 42,
+  "dynamicCapabilities": "off",
+  "instructions": "Work in the supplied fixture only. Preserve public CommonJS exports and use integer cents. Do not install dependencies or claim to have run unavailable commands.",
+  "capabilities": {
+    "skills": [
+      {
+        "id": "boundary-tests",
+        "description": "Investigate inclusive/exclusive boundaries, preserve nearby valid behavior, and write regression assertions that reject the original bug.",
+        "instructions": "Read the relevant implementation before editing. Check the exact threshold, the immediately lower value, and empty/zero cases. For regression tests, assert observable behavior, not source text. Preserve existing exports and avoid hardcoded answers."
+      },
+      {
+        "id": "money-flow",
+        "description": "Trace quantity, discount, and shipping calculations across modules using integer cents.",
+        "instructions": "Trace the public entry point through its helpers. Identify which subtotal each rule consumes. Quantity multiplies unit price. Discounts apply before shipping eligibility when the task says so. Test exact thresholds and discounted baskets mentally; report unavailable checks honestly."
+      }
+    ],
+    "specialists": [
+      {
+        "id": "flow-investigator",
+        "description": "Investigate a multi-module pricing or boundary bug and identify concrete faulty call sites; avoid delegation for a one-file fix.",
+        "role": "Read the supplied modules and return evidence about faulty conditions and data flow. Do not edit; the main agent owns changes.",
+        "skills": ["money-flow"],
+        "tools": ["list_files", "read_file", "search_files"],
+        "maxTurns": 4,
+        "maxToolCalls": 8
+      }
+    ]
+  },
+  "verifier": {
+    "timeoutMs": 3000,
+    "maxOutputBytes": 16000
+  },
+  "tasks": [
+    {
+      "id": "cart-quantity",
+      "task": "Fix cartTotal so a basket total in integer cents multiplies each line's unitPriceCents by quantity. Empty baskets and zero quantity must total zero. Keep the cartTotal export and do not change unrelated files.",
+      "files": {
+        "cart.cjs": "\"use strict\";\nfunction cartTotal(lines) {\n  return lines.reduce((total, line) => total + line.unitPriceCents, 0);\n}\nmodule.exports = { cartTotal };\n",
+        "NOTES.txt": "Cart lines have nonnegative integer unitPriceCents and quantity. Inputs are already validated by the caller.\n"
+      },
+      "writablePaths": ["cart.cjs"],
+      "requiredChangedPaths": ["cart.cjs"],
+      "checks": [
+        {
+          "id": "quantity",
+          "code": "const assert = require('node:assert/strict');\nconst { cartTotal } = require('./cart.cjs');\nassert.equal(cartTotal([{unitPriceCents:125,quantity:3},{unitPriceCents:80,quantity:2}]), 535);\nassert.equal(cartTotal([{unitPriceCents:17,quantity:7}]), 119);"
+        },
+        {
+          "id": "zero-quantity",
+          "code": "const assert = require('node:assert/strict');\nconst { cartTotal } = require('./cart.cjs');\nassert.equal(cartTotal([{unitPriceCents:999,quantity:0}]), 0);"
+        },
+        {
+          "id": "preserved-cases",
+          "code": "const assert = require('node:assert/strict');\nconst { cartTotal } = require('./cart.cjs');\nassert.equal(cartTotal([]), 0);\nassert.equal(cartTotal([{unitPriceCents:125,quantity:1}]), 125);"
+        }
+      ],
+      "expectedInitialFailures": ["quantity", "zero-quantity"]
+    },
+    {
+      "id": "retry-boundary-regression",
+      "task": "Fix canRetry(attempt, maxAttempts): attempt is zero-based, so retries are allowed only while attempt < maxAttempts. Add meaningful regression assertions to retry.test.cjs, whose CommonJS export must be a synchronous function regression(assert, canRetry). Use the injected assertion API and injected canRetry function, not an imported implementation, so the harness can check your regression against the original bug. Cover (2,3), (3,3), and (0,0); preserve the implementation's named export.",
+      "files": {
+        "retry.cjs": "\"use strict\";\nfunction canRetry(attempt, maxAttempts) {\n  return attempt <= maxAttempts;\n}\nmodule.exports = { canRetry };\n",
+        "retry.test.cjs": "\"use strict\";\nmodule.exports = function regression(assert, canRetry) {\n  // Add boundary regression assertions here.\n};\n"
+      },
+      "writablePaths": ["retry.cjs", "retry.test.cjs"],
+      "requiredChangedPaths": ["retry.cjs", "retry.test.cjs"],
+      "checks": [
+        {
+          "id": "exact-boundary",
+          "code": "const assert = require('node:assert/strict');\nconst { canRetry } = require('./retry.cjs');\nassert.equal(canRetry(3,3), false);\nassert.equal(canRetry(0,0), false);\nassert.equal(canRetry(10,10), false);"
+        },
+        {
+          "id": "below-and-above",
+          "code": "const assert = require('node:assert/strict');\nconst { canRetry } = require('./retry.cjs');\nassert.equal(canRetry(2,3), true);\nassert.equal(canRetry(0,1), true);\nassert.equal(canRetry(4,3), false);"
+        },
+        {
+          "id": "regression-scope",
+          "code": "const assert = require('node:assert/strict');\nconst regression = require('./retry.test.cjs');\nconst { canRetry } = require('./retry.cjs');\nassert.equal(typeof regression, 'function');\nconst observed = [];\nlet assertions = 0;\nconst api = Object.freeze({equal: (...args) => { assertions++; assert.equal(...args); }});\nregression(api, (attempt, max) => { observed.push([attempt,max]); return canRetry(attempt,max); });\nassert.ok(assertions >= 3, 'At least three behavioral assertions are required');\nfor (const pair of [[2,3],[3,3],[0,0]]) assert.ok(observed.some(([a,b]) => a === pair[0] && b === pair[1]), 'Missing boundary input');"
+        },
+        {
+          "id": "regression-rejects-original",
+          "code": "const assert = require('node:assert/strict');\nconst regression = require('./retry.test.cjs');\nassert.throws(() => regression(assert, (attempt,max) => attempt <= max), 'Regression must fail against the original off-by-one implementation');\nregression(assert, (attempt,max) => attempt < max);"
+        }
+      ],
+      "expectedInitialFailures": ["exact-boundary", "regression-scope", "regression-rejects-original"]
+    },
+    {
+      "id": "discounted-shipping",
+      "task": "Investigate checkout pricing across modules and fix both shipping boundary/data-flow bugs. Shipping is free when the discounted merchandise subtotal is AT LEAST 5000 cents; otherwise it costs 500 cents. Percentage coupons use existing integer-cent rounding. Ensure checkout asks the shipping helper about the post-discount subtotal. Preserve named exports and do not alter coupon or line-total behavior.",
+      "files": {
+        "src/checkout.cjs": "\"use strict\";\nconst { subtotal } = require('./lines.cjs');\nconst { discounted } = require('./discount.cjs');\nconst { shipping } = require('./shipping.cjs');\nfunction checkout(lines, percentOff = 0) {\n  const beforeDiscount = subtotal(lines);\n  return discounted(beforeDiscount, percentOff) + shipping(beforeDiscount);\n}\nmodule.exports = { checkout };\n",
+        "src/lines.cjs": "\"use strict\";\nfunction subtotal(lines) {\n  return lines.reduce((sum, line) => sum + line.unitPriceCents * line.quantity, 0);\n}\nmodule.exports = { subtotal };\n",
+        "src/discount.cjs": "\"use strict\";\nfunction discounted(cents, percentOff) {\n  return Math.round(cents * (100 - percentOff) / 100);\n}\nmodule.exports = { discounted };\n",
+        "src/shipping.cjs": "\"use strict\";\nfunction shipping(merchandiseCents) {\n  return merchandiseCents > 5000 ? 0 : 500;\n}\nmodule.exports = { shipping };\n"
+      },
+      "writablePaths": ["src/checkout.cjs", "src/shipping.cjs"],
+      "requiredChangedPaths": ["src/checkout.cjs", "src/shipping.cjs"],
+      "checks": [
+        {
+          "id": "shipping-boundary",
+          "code": "const assert = require('node:assert/strict');\nconst { shipping } = require('./src/shipping.cjs');\nassert.equal(shipping(5000), 0);\nassert.equal(shipping(4999), 500);\nassert.equal(shipping(5001), 0);"
+        },
+        {
+          "id": "discount-before-shipping",
+          "code": "const assert = require('node:assert/strict');\nconst { checkout } = require('./src/checkout.cjs');\nassert.equal(checkout([{unitPriceCents:3000,quantity:2}], 20), 5300);\nassert.equal(checkout([{unitPriceCents:2500,quantity:4}], 51), 5400);\nassert.equal(checkout([{unitPriceCents:2500,quantity:4}], 50), 5000);"
+        },
+        {
+          "id": "unchanged-pricing",
+          "code": "const assert = require('node:assert/strict');\nconst { checkout } = require('./src/checkout.cjs');\nconst { discounted } = require('./src/discount.cjs');\nassert.equal(checkout([{unitPriceCents:2000,quantity:3}]), 6000);\nassert.equal(checkout([{unitPriceCents:999,quantity:2}], 10), 2298);\nassert.equal(discounted(999, 10), 899);\nassert.equal(checkout([]), 500);"
+        }
+      ],
+      "expectedInitialFailures": ["shipping-boundary", "discount-before-shipping"]
+    }
+  ]
+}
