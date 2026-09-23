@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, writeFile, rm, readdir, lstat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, readdir, lstat, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -236,7 +236,7 @@ export async function benchmarkCode(project: Project, input: unknown, signal: Ab
   for (const { task, repetition, variant } of order) {
     if (signal.aborted) break;
     const started = performance.now();
-    const root = await mkdtemp(path.join(tmpdir(), "jev-code-benchmark-"));
+    const root = await mkdtemp(path.join(await realpath(tmpdir()), "jev-code-benchmark-"));
     const row: CodingTrial = {
       taskId: task.id, repetition, variant, status: "fixture_error", acceptancePassed: false, integrityPassed: false,
       failureReasons: [], initialTreeHash: treeHash(task.files), finalTreeHash: null, changedPaths: [],

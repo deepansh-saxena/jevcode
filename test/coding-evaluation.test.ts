@@ -1,6 +1,6 @@
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { readFile, writeFile, readdir } from "node:fs/promises";
+import { readFile, writeFile, readdir, mkdtemp, symlink, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
@@ -101,8 +101,8 @@ test("paired coding trials really edit fresh trees with identical policy, determ
   const report = await benchmarkCode(project, suite, signal(), options);
   assert.equal(report.validComparison, true, JSON.stringify(report));
   assert.equal(report.trials.length, 12);
-  assert.equal(report.baseline.accepted, 6);
-  assert.equal(report.jev.accepted, 6);
+  assert.equal(report.baseline.accepted, 6, JSON.stringify(report.trials));
+  assert.equal(report.jev.accepted, 6, JSON.stringify(report.trials));
   assert.equal(report.paired.bothPassed, 6);
   assert.equal(report.paired.incomplete, 0);
   assert.equal(report.baseline.costUsd, null);
@@ -144,6 +144,32 @@ test("confident answers, wrong patches, broken syntax, and empty generated tests
       assert.ok(report.trials.every((trial) => trial.status === "completed"));
       assert.ok(report.trials.every((trial) => trial.verifier?.status !== "passed"));
     });
+  }
+});
+
+test("suite-owned skills load when the OS temporary directory has a symlink ancestor", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const project = await projectWithJev(t);
+  const suite = await example();
+  suite.tasks = [suite.tasks[0]!];
+  suite.repetitions = 1;
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), "jev-temp-alias-test-"));
+  const alias = path.join(root, "alias");
+  const previous = process.env.TMPDIR;
+  try {
+    await symlink(root, alias, "dir");
+    process.env.TMPDIR = alias;
+    assert.notEqual(tmpdir(), await realpath(tmpdir()));
+    const report = await benchmarkCode(project, suite, signal(), { ...consent, env, model: editingModel(suite) });
+    assert.equal(report.validComparison, true, JSON.stringify(report.trials));
+    assert.equal(report.baseline.accepted, 1, JSON.stringify(report.trials));
+    assert.equal(report.jev.accepted, 1, JSON.stringify(report.trials));
+    assert.deepEqual(await readdir(root), ["alias"]);
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+    await rm(root, { recursive: true, force: true });
   }
 });
 
