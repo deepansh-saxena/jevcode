@@ -17,6 +17,7 @@ export function transportBridge(source: Pick<Transport, "start" | "send" | "clos
   onclose?: Transport["onclose"]; onerror?: Transport["onerror"]; onmessage?: Transport["onmessage"];
   setProtocolVersion?: Transport["setProtocolVersion"];
 }): Transport {
+  let closing: Promise<void> | undefined;
   const bridge: Transport = {
     async start() {
       source.onclose = () => bridge.onclose?.();
@@ -25,7 +26,7 @@ export function transportBridge(source: Pick<Transport, "start" | "send" | "clos
       await source.start();
     },
     async send(message, options) { await source.send(message, options); },
-    async close() { await source.close(); },
+    close() { return closing ??= Promise.resolve().then(() => source.close()); },
     setProtocolVersion(version) { source.setProtocolVersion?.(version); },
   };
   return bridge;
@@ -64,6 +65,7 @@ export class McpConnection {
   private catalog: McpTool[] = [];
   private connected = false;
   private failure?: string;
+  private closing: Promise<void> | undefined;
   private validator = new AjvJsonSchemaValidator();
   constructor(readonly id: string, readonly config: McpServerConfig, private cwd: string, private env: NodeJS.ProcessEnv) {}
 
@@ -71,6 +73,7 @@ export class McpConnection {
 
   async connect(signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
+    if (this.transport || this.closing) throw new BlockedError("MCP connection already started or closed");
     let transport: Transport;
     if (this.config.transport === "stdio") transport = new BoundedStdioTransport(this.config, this.cwd, this.env);
     else {
@@ -109,7 +112,8 @@ export class McpConnection {
         if (cursor && (page.tools.length === 0 || seen.has(`cursor:${cursor}`))) throw new Error("Invalid MCP pagination");
         if (cursor) seen.add(`cursor:${cursor}`);
       } while (cursor);
-      signal.throwIfAborted();
+      requestSignal.throwIfAborted();
+      if (this.closing) throw new BlockedError("MCP connection is closing");
       this.connected = true;
     } catch {
       await this.close();
@@ -155,20 +159,27 @@ export class McpConnection {
     });
   }
 
-  async close(): Promise<void> {
+  close(): Promise<void> {
+    if (this.closing) return this.closing;
     this.connected = false;
-    const timer = setTimeout(() => this.lifetime.abort(new Error("MCP session cleanup deadline")), 1000);
-    let failure = false;
-    try {
-      if (this.http?.sessionId && !this.lifetime.signal.aborted) {
-        try { await this.http.terminateSession(); } catch { failure = true; }
+    this.closing = Promise.resolve().then(async () => {
+      const timer = setTimeout(() => this.lifetime.abort(new Error("MCP session cleanup deadline")), 1000);
+      const failures: unknown[] = [];
+      try {
+        if (this.http?.sessionId && !this.lifetime.signal.aborted) {
+          try { await this.http.terminateSession(); } catch (error) { failures.push(error); }
+        }
+      } finally {
+        clearTimeout(timer);
+        this.lifetime.abort(new Error("MCP connection closed"));
+        const results = await Promise.allSettled([
+          Promise.resolve().then(() => this.client.close()),
+          Promise.resolve().then(() => this.transport?.close()),
+        ]);
+        for (const result of results) if (result.status === "rejected") failures.push(result.reason);
       }
-    } finally {
-      clearTimeout(timer);
-      this.lifetime.abort(new Error("MCP connection closed"));
-      await this.client.close();
-      await this.transport?.close();
-    }
-    if (failure) throw new Error("MCP transport closed, but remote session termination failed; server-side cleanup may be needed");
+      if (failures.length) throw new AggregateError(failures, "MCP cleanup failed; inspect server-side state before reconnecting");
+    });
+    return this.closing;
   }
 }

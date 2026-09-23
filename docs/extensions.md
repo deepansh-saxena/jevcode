@@ -186,6 +186,9 @@ notifications/ping/cancellation, and teardown, **not** `tools/call`.
 HTTP sessions receive a bounded termination request; failed server-side cleanup
 is reported explicitly.
 Reconnect always requires fresh approval; there is no automatic reconnect.
+Concurrent/repeated connection closes share one cleanup result and send at most
+one HTTP session termination request. Local transport cleanup is still attempted
+if remote termination or SDK cleanup fails.
 
 The Node-20-compatible official MCP SDK is pinned to `1.30.0`. Its Client
 and Streamable HTTP transport handle protocol negotiation. Stdio uses the
@@ -202,7 +205,14 @@ and ordinary read-only sessions. Moving a host into a non-external run suspends
 connections and clears hook trust. Explicit external permission is a separate
 capability, so it can be granted without local file-write permission.
 Cancellation tears down connections and active hooks and clears executable
-trust; reconnect/re-enable explicitly. Exit closes all host resources.
+trust, including approvals still awaiting an answer. Callable MCP actions are
+revoked immediately; cancellation also waits for in-progress startup resources
+and disconnects to close. Concurrent cancellations join the same cleanup.
+Fresh starts are blocked until cleanup succeeds, then require explicit
+reconnect/re-enable approval. Failed MCP cleanup remains an error on subsequent
+cleanup attempts; inspect external state and start a new host/session rather than
+silently retrying. Exit permanently closes the host; late approval responses
+cannot reopen it or install a plugin.
 
 HTTP requires HTTPS, except loopback HTTP for development; credentials, query
 strings, fragments, redirects, alternate endpoints, OAuth flows, and automatic
@@ -219,6 +229,9 @@ Server stderr is bounded and discarded rather than copied into logs. Sampling,
 elicitation, arbitrary resources/prompts, server-driven model calls, and
 experimental task APIs are not exposed. On Unix, Jev terminates its owned
 process group; on Windows, only the directly owned child process is terminated.
+Stdio shutdown allows 300 ms after SIGTERM, escalates to SIGKILL when necessary,
+and waits up to another second for the direct child's close event. Failure to
+observe that event is reported, not treated as successful cleanup.
 Trusted code that deliberately detaches itself is outside this process-lifetime
 guarantee.
 
@@ -268,11 +281,14 @@ execution returned successfully. No hook can autoapprove another action.
 `new ExtensionHost(project)` owns passive declarations and session-only trust.
 `handleExtensionCommand(line, host, io)` returns whether it handled a command.
 `io` supplies `confirm`, `write`, `signal`, `permissions`, and context flags.
+`confirm(prompt, signal?)` receives a host-scoped abort signal so interactive
+prompts can dismiss on cancellation. A late response from an implementation
+that ignores the signal is still rejected.
 `host.tools(context)` gates MCP tools; the runtime invokes
 `beforeTool(action, signal)` / `afterTool(action, result, signal)` only in
 foreground, external-enabled main-agent contexts.
 `host.cancel()` terminates active resources/revokes executable trust, while
-allowing fresh user trust later. `host.close()` also removes plugin capabilities
+allowing fresh user trust after successful cleanup. `host.close()` also removes plugin capabilities
 and permanently closes the host.
 
 `RunOptions.extensions`, `background`, and `skillArguments` are optional.

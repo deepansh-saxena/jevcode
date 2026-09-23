@@ -17,7 +17,7 @@ export interface ExtensionContext {
 }
 export interface ExtensionIO extends ExtensionContext {
   write: (text: string) => void;
-  confirm: (prompt: string) => Promise<boolean>;
+  confirm: (prompt: string, signal?: AbortSignal) => Promise<boolean>;
   signal: AbortSignal;
 }
 type Owned<T> = { config: T; cwd: string; pluginId?: string };
@@ -33,8 +33,11 @@ export class ExtensionHost {
   private hooks = new Map<string, Owned<HookConfig>>();
   private trustedHooks = new Set<string>();
   private connections = new Map<string, McpConnection>();
+  private connecting = new Map<string, AbortSignal>();
+  private disconnecting = new Map<string, Promise<void>>();
   private activeHooks = new Set<Promise<string>>();
   private lifetime = new AbortController();
+  private cancelling: Promise<void> | undefined;
   private closed = false;
 
   constructor(readonly project: Project, private environment: NodeJS.ProcessEnv = process.env) {
@@ -60,9 +63,14 @@ export class ExtensionHost {
 
   private usable(io: ExtensionIO, external: boolean): void {
     if (this.closed) throw new BlockedError("Extension host is closed");
+    if (this.cancelling) throw new BlockedError("Extension cleanup is in progress; wait before granting fresh trust");
     io.signal.throwIfAborted();
     if (io.planMode || io.background || io.specialist) throw new BlockedError("Extensions cannot be enabled in plan, background, or specialist contexts");
     if (external && !extensionsAllowed(io)) throw new BlockedError("Explicit external permission is required before trusting MCP or hooks");
+  }
+
+  private scopedIO(io: ExtensionIO): ExtensionIO {
+    return { ...io, signal: AbortSignal.any([io.signal, this.lifetime.signal]) };
   }
 
   private async trust(io: ExtensionIO, label: string, details: unknown, external: boolean): Promise<void> {
@@ -70,7 +78,7 @@ export class ExtensionHost {
     ensureShareable(details);
     if (!await io.confirm(`${label}\n${JSON.stringify(details, null, 2)}\n${external ?
       "UNSANDBOXED: this may execute arbitrary code, access files (including credentials), or contact the network. Only trust code/services you reviewed. " :
-      "This adds persistent on-disk instructions to this session, but never grants executable permissions. "}Trust for this session only? Type yes: `)) {
+      "This adds persistent on-disk instructions to this session, but never grants executable permissions. "}Trust for this session only? Type yes: `, io.signal)) {
       throw new BlockedError("Extension trust was not approved");
     }
     this.usable(io, external);
@@ -85,6 +93,7 @@ export class ExtensionHost {
   }
 
   async enablePlugin(id: string, io: ExtensionIO): Promise<void> {
+    io = this.scopedIO(io);
     this.usable(io, false);
     if (this.plugins.has(id)) throw new Error(`Plugin ${id} is already enabled; disable before re-enabling`);
     const directory = this.project.config.extensions?.plugins[id];
@@ -116,6 +125,7 @@ export class ExtensionHost {
       agents: agents.map((agent) => ({ id: agent.id, description: agent.description })),
       note: "MCP servers and hooks remain disabled until separately trusted. Existing project/user capabilities win ID collisions." }, false);
     if (await readCapability(root, "jev-plugin.json") !== text) throw new Error("Plugin manifest changed during approval");
+    this.usable(io, false);
     this.plugins.set(id, { root, hash: digest(text) });
     this.project.skills.push(...skills.filter((item) => !this.project.skills.some((existing) => existing.id === item.id)));
     this.project.specialists.push(...agents.filter((item) => !this.project.specialists.some((existing) => existing.id === item.id)));
@@ -133,32 +143,57 @@ export class ExtensionHost {
   }
 
   async connect(id: string, io: ExtensionIO): Promise<void> {
+    io = this.scopedIO(io);
+    this.usable(io, true);
     const entry = this.servers.get(id);
     if (!entry) throw new Error(`Unknown MCP server: ${id}`);
-    await this.validatePlugin(entry.pluginId);
-    await this.trust(io, `Connect MCP server ${id}?`, { ...entry, protocol:
-      "Trust covers initialize, bounded tools/list, protocol ping/cancellation/notifications, and connection teardown. Each tools/call requires a new exact-action approval. No sampling, elicitation, resources, prompts, or automatic reconnect." }, true);
-    await this.disconnect(id);
-    await this.validatePlugin(entry.pluginId);
-    const connection = new McpConnection(id, entry.config, entry.cwd, this.environment);
-    await connection.connect(AbortSignal.any([io.signal, this.lifetime.signal]));
-    this.connections.set(id, connection);
+    const pending = this.connecting.get(id);
+    if (pending && !pending.aborted) throw new BlockedError(`MCP server ${id} is already connecting`);
+    this.connecting.set(id, io.signal);
+    try {
+      await this.validatePlugin(entry.pluginId);
+      await this.trust(io, `Connect MCP server ${id}?`, { ...entry, protocol:
+        "Trust covers initialize, bounded tools/list, protocol ping/cancellation/notifications, and connection teardown. Each tools/call requires a new exact-action approval. No sampling, elicitation, resources, prompts, or automatic reconnect." }, true);
+      await this.disconnect(id);
+      await this.validatePlugin(entry.pluginId);
+      this.usable(io, true);
+      const connection = new McpConnection(id, entry.config, entry.cwd, this.environment);
+      this.connections.set(id, connection);
+      try {
+        await connection.connect(io.signal);
+        this.usable(io, true);
+      } catch (error) {
+        if (this.connections.get(id) === connection) await this.disconnect(id);
+        else await connection.close();
+        throw error;
+      }
+    } finally {
+      if (this.connecting.get(id) === io.signal) this.connecting.delete(id);
+    }
   }
 
-  async disconnect(id: string): Promise<void> {
+  disconnect(id: string): Promise<void> {
     if (!this.servers.has(id)) throw new Error(`Unknown MCP server: ${id}`);
+    const pending = this.disconnecting.get(id);
+    if (pending) return pending;
     const connection = this.connections.get(id);
     this.connections.delete(id);
-    await connection?.close();
+    if (!connection) return Promise.resolve();
+    const closing = connection.close().then(() => { this.disconnecting.delete(id); });
+    this.disconnecting.set(id, closing);
+    return closing;
   }
 
   async enableHook(id: string, io: ExtensionIO): Promise<void> {
+    io = this.scopedIO(io);
+    this.usable(io, true);
     const entry = this.hooks.get(id);
     if (!entry) throw new Error(`Unknown hook: ${id}`);
     await this.validatePlugin(entry.pluginId);
     await this.trust(io, `Enable ${entry.config.event}-tool hook ${id}?`, { ...entry,
       input: "Tool name and approved arguments. After hooks receive only completed:true, not file results, conversation, images, or auth.",
       result: "Hooks can only deny; they cannot approve or change tool arguments. Before-hook failure prevents execution." }, true);
+    this.usable(io, true);
     this.trustedHooks.add(id);
   }
 
@@ -168,7 +203,7 @@ export class ExtensionHost {
   }
 
   tools(context: ExtensionContext): Tool[] {
-    if (this.closed || !extensionsAllowed(context)) return [];
+    if (this.closed || this.cancelling || this.lifetime.signal.aborted || !extensionsAllowed(context)) return [];
     return [...this.connections.values()].flatMap((connection) => connection.tools());
   }
 
@@ -197,16 +232,20 @@ export class ExtensionHost {
   async beforeTool(action: PreparedAction, signal: AbortSignal): Promise<void> { await this.hooksFor("before", action, signal); }
   async afterTool(action: PreparedAction, _result: unknown, signal: AbortSignal): Promise<void> { await this.hooksFor("after", action, signal); }
 
-  async cancel(): Promise<void> {
+  cancel(): Promise<void> {
+    if (this.cancelling) return this.cancelling;
+    const closing = [...this.connections.keys()].map((id) => this.disconnect(id));
+    this.cancelling = Promise.all([
+      Promise.allSettled([...new Set([...closing, ...this.disconnecting.values()])]),
+      Promise.allSettled([...this.activeHooks]),
+    ]).then(([results]) => {
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw new Error("An MCP connection failed to clean up", { cause: failure.reason });
+      if (!this.closed) this.lifetime = new AbortController();
+    }).finally(() => { this.cancelling = undefined; });
     this.lifetime.abort(new Error("Extensions closed"));
     this.trustedHooks.clear();
-    const connections = [...this.connections.values()];
-    this.connections.clear();
-    await Promise.allSettled([...this.activeHooks]);
-    const results = await Promise.allSettled(connections.map((connection) => connection.close()));
-    const failure = results.find((result) => result.status === "rejected");
-    if (failure?.status === "rejected") throw new Error("An MCP connection failed to clean up", { cause: failure.reason });
-    this.lifetime = new AbortController();
+    return this.cancelling;
   }
 
   async close(): Promise<void> {

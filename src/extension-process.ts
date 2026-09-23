@@ -43,6 +43,9 @@ export class BoundedStdioTransport implements Transport {
   onmessage?: NonNullable<Transport["onmessage"]>;
   private child?: ChildProcessWithoutNullStreams;
   private closing?: Promise<void>;
+  private closed = false;
+  private groupKilled = false;
+  private cleanupFailures: unknown[] = [];
   private totalBytes = 0;
   private buffer = new ReadBuffer({ maxBufferSize: EXTENSION_OUTPUT_LIMIT });
 
@@ -75,7 +78,11 @@ export class BoundedStdioTransport implements Transport {
     child.stdin.on("error", () => fail(new Error("MCP stdin closed")));
     child.stdout.on("error", () => fail(new Error("MCP stdout failed")));
     child.on("close", () => {
-      try { stopGroup(child, "SIGKILL"); } catch (error) { this.onerror?.(error instanceof Error ? error : new Error("MCP cleanup failed")); }
+      this.closed = true;
+      try { this.killGroup(child); } catch (error) {
+        this.cleanupFailures.push(error);
+        this.onerror?.(error instanceof Error ? error : new Error("MCP cleanup failed"));
+      }
       this.onclose?.();
     });
     await new Promise<void>((resolve, reject) => {
@@ -91,23 +98,36 @@ export class BoundedStdioTransport implements Transport {
     await new Promise<void>((resolve, reject) => this.child!.stdin.write(text, (error) => error ? reject(new Error("MCP write failed")) : resolve()));
   }
 
-  async close(): Promise<void> {
+  private killGroup(child: ChildProcessWithoutNullStreams): void {
+    if (this.groupKilled) return;
+    stopGroup(child, "SIGKILL");
+    this.groupKilled = true;
+  }
+
+  close(): Promise<void> {
     if (this.closing) return this.closing;
     const child = this.child;
-    this.closing = (async () => {
+    this.closing = Promise.resolve().then(async () => {
       if (!child) return;
-      child.stdin.destroy();
-      stopGroup(child, "SIGTERM");
-      await new Promise<void>((resolve) => {
-        if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
-        const timer = setTimeout(resolve, 300);
-        child.once("close", () => { clearTimeout(timer); resolve(); });
+      const waitForClose = (timeoutMs: number): Promise<boolean> => new Promise((resolve) => {
+        if (this.closed) { resolve(true); return; }
+        const done = (): void => { clearTimeout(timer); resolve(true); };
+        const timer = setTimeout(() => { child.removeListener("close", done); resolve(false); }, timeoutMs);
+        child.once("close", done);
       });
-      stopGroup(child, "SIGKILL");
+      child.stdin.destroy();
+      if (!this.closed) {
+        try { stopGroup(child, "SIGTERM"); } catch (error) { this.cleanupFailures.push(error); }
+        if (!await waitForClose(300)) {
+          try { this.killGroup(child); } catch (error) { this.cleanupFailures.push(error); }
+        }
+      }
       child.stdout.destroy();
       child.stderr.destroy();
+      if (!await waitForClose(1000)) this.cleanupFailures.push(new Error("MCP child did not close after termination"));
       this.buffer.clear();
-    })();
+      if (this.cleanupFailures.length) throw new AggregateError(this.cleanupFailures, "MCP process cleanup failed");
+    });
     return this.closing;
   }
 }
