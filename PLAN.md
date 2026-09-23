@@ -80,7 +80,12 @@ The full CLI expansion also includes:
 - Repeated paired coding fixtures, fixed executable acceptance checks, exact
   initial bug reproduction and a credential-free offline preflight CLI.
 
-Remaining parity work includes marketplace distribution, MCP OAuth/full protocol
+Public skills.sh search, commit-pinned GitHub preview, and reviewed project-local
+installation are implemented. Remote skills are validated, never executed during
+installation, and never granted extra permissions. Automatic updates and publishing
+are not supported.
+
+Remaining parity work includes marketplace publishing, MCP OAuth/full protocol
 support, nested delegation, persistent jobs/undo, broader frontmatter support and
 production isolation/platform assurance. These are not placeholder commands.
 
@@ -168,7 +173,8 @@ result distinguishes completed, failed, blocked, and cancelled work.
 ## Skill and specialist registries
 
 Use local, explicitly trusted manifests. Supported project and personal catalogs
-are discovered passively; remote installation and marketplace discovery are not implemented.
+are discovered passively; public marketplace discovery and exact-file-approved
+installation are explicit user commands, not automatic model-triggered downloads.
 
 | Registry | Minimum metadata |
 | --- | --- |

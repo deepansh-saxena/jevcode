@@ -2,7 +2,7 @@ import { lstat, readdir } from "node:fs/promises";
 import path from "node:path";
 import { parseDocument, visit, isAlias, isScalar } from "yaml";
 import { z } from "zod";
-import { idSchema, skillSchema, specialistSchema, type CapabilityProvenance, type Skill, type Specialist } from "./config.js";
+import { idSchema, marketplaceOriginSchema, skillSchema, specialistSchema, type CapabilityProvenance, type Skill, type Specialist } from "./config.js";
 import { BlockedError, isMissing } from "./errors.js";
 import { excluded, readText, resolvePath } from "./workspace.js";
 import { ensureShareable } from "./jev.js";
@@ -25,6 +25,13 @@ const agentMetadata = z.object({
   skills: z.array(idSchema).max(16).optional(),
   maxTurns: z.number().int().min(1).max(20).optional(),
 }).strict();
+
+export const MARKETPLACE_RECEIPT = ".jev-marketplace.json";
+
+export function parseSkillMarkdown(text: string) {
+  const { metadata, body } = frontmatter(text);
+  return { metadata: skillMetadata.parse(metadata), body };
+}
 
 export function frontmatter(text: string): { metadata: unknown; body: string } {
   if (text.includes("\0")) throw new Error("Binary capability content is not supported");
@@ -83,7 +90,7 @@ async function resources(root: string, directory: string): Promise<string[]> {
     if (depth > 4 || ++count > 64) throw new Error("Skill resource directory limit exceeded");
     for (const entry of await entries(root, relative)) {
       const filename = `${relative}/${entry.name}`;
-      if (entry.name === "SKILL.md") continue;
+      if (entry.name === "SKILL.md" || (depth === 0 && entry.name === MARKETPLACE_RECEIPT)) continue;
       safeCapabilityPath(filename.replace(/^(?:\.jev|\.claude)\//, ""));
       if (entry.isSymbolicLink()) throw new BlockedError("Symbolic links are not supported in capabilities");
       if (entry.isDirectory()) await walk(filename, depth + 1);
@@ -131,12 +138,17 @@ export async function discoverSkills(root: string, directory: string, options: C
       const { metadata } = frontmatter(await readCapability(root, filename));
       const parsed = commands ? { ...commandMetadata.parse(metadata), name: idSchema.parse(entry.name.slice(0, -3)) } : skillMetadata.parse(metadata);
       if (!commands && parsed.name !== entry.name) throw new Error("SKILL.md name must match its directory");
+      const origin = provenance(root, filename, commands ? "claude-command" : "skill-md", options);
+      if (!commands) {
+        try { origin.marketplace = marketplaceOriginSchema.parse(JSON.parse(await readCapability(root, `${source}/${MARKETPLACE_RECEIPT}`))); }
+        catch (error) { if (!isMissing(error)) throw error; }
+      }
       result.push({
         id: parsed.name, version: "1", description: parsed.description ?? parsed.name, mandatory: false,
         instructions: filename, resources: commands ? [] : await resources(root, source),
         modelInvocable: !parsed["disable-model-invocation"], userInvocable: parsed["user-invocable"] !== false,
         argumentHint: parsed["argument-hint"],
-        provenance: provenance(root, filename, commands ? "claude-command" : "skill-md", options),
+        provenance: origin,
       });
     }
     if (result.length > 64) throw new Error(`${directory}: at most 64 capabilities are supported`);

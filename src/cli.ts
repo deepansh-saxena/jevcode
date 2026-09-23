@@ -23,6 +23,9 @@ Usage:
   jevcode serve [--cwd DIR] [--provider copilot|openai|api] [--model ID] [--plan]
   jevcode init [--cwd DIR]
   jevcode inspect [--cwd DIR]
+  jevcode skills search QUERY [--cwd DIR]
+  jevcode skills preview OWNER/REPO@SKILL [--cwd DIR]
+  jevcode skills install OWNER/REPO@SKILL --write [--cwd DIR]
   jevcode login <copilot|openai> [--cwd DIR] [--model ID]
   jevcode logout <copilot|openai>
   jevcode auth status
@@ -162,6 +165,37 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (positionals.length !== 1) throw new Error("init does not take a task");
     await initialize(root);
     process.stdout.write("Created .jev/ with separate skills and specialists. Set the model and credentials before running.\n");
+    return;
+  }
+  if (command === "skills") {
+    const action = positionals[1];
+    if (!action || !["search", "preview", "install"].includes(action) || positionals.length < 3 ||
+      (action !== "search" && positionals.length !== 3)) {
+      throw new Error("Usage: jevcode skills search QUERY | preview OWNER/REPO@SKILL | install OWNER/REPO@SKILL --write");
+    }
+    if (action === "install" && (!process.stdin.isTTY || !process.stderr.isTTY)) {
+      throw new Error("Skill installation requires an interactive terminal for exact-file approval; use skills preview to inspect without installing");
+    }
+    const project = await loadProject(root);
+    const { handleMarketplaceCommand } = await import("./marketplace.js");
+    const controller = new AbortController();
+    const abort = (): void => controller.abort(new Error("Marketplace operation cancelled"));
+    const terminal = action === "install" ? new PlainTerminal(project) : undefined;
+    if (terminal) terminal.onCancel = abort;
+    for (const event of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(event, abort);
+    try {
+      await handleMarketplaceCommand(action, positionals.slice(2).join(" "), project,
+        { write: values.write ?? false, planMode: values.plan ?? false }, {
+          signal: controller.signal, write: (text) => process.stdout.write(terminalSafe(text)),
+          confirm: async (prompt, signal) => {
+            if (!terminal) throw new Error("Interactive approval is unavailable");
+            return (await terminal.read(prompt, true, signal))?.trim().toLowerCase() === "yes";
+          },
+        });
+    } finally {
+      terminal?.close();
+      for (const event of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.removeListener(event, abort);
+    }
     return;
   }
   if (command !== "inspect" && command !== "run" && command !== "chat" && command !== "serve") throw new Error(`Unknown command: ${command}`);

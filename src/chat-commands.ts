@@ -17,7 +17,7 @@ const commands: Record<string, string> = {
   status: "Show model, routing, skills, specialist, planning, and permissions",
   clear: "Clear the conversation without changing files",
   new: "Alias for /clear",
-  skills: "List skills; show ID | use ID... | use none | run ID [task] | create DESCRIPTION",
+  skills: "List skills; show/use/run/create | search QUERY | preview OWNER/REPO@SKILL | install OWNER/REPO@SKILL",
   agents: "List specialists; show ID | use ID | use off | run ID TASK | create DESCRIPTION",
   permissions: "Show permissions, or set read-only | edit | commands | all | execution | external (fresh approval to enable)",
   tasks: "List attached shell and specialist tasks",
@@ -99,6 +99,7 @@ export function recordRun(state: ChatState, result: RunResult,
 export function commandCompletions(project: Project, line: string): [string[], string] {
   if (!line.startsWith("/")) return [[], line];
   let candidates = [...Object.keys(commands), ...project.skills.filter((skill) => skill.userInvocable !== false).map((skill) => skill.id)].map((name) => `/${name}`);
+  if (line.startsWith("/skills ")) candidates = ["show", "use", "run", "create", "search", "preview", "install"].map((action) => `/skills ${action} `);
   const match = /^(\/(?:skills (?:show|use|run)|agents (?:show|use|run)) )(\S*)$/.exec(line);
   if (match) {
     const items = match[1]!.startsWith("/skills") ? project.skills.filter((skill) =>
@@ -176,6 +177,12 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       const kind = name === "skills" ? "skills" : "specialists";
       const action = parts[0];
       if (!action) { print(name === "skills" ? capabilityCatalog(project).skills : project.specialists); return handled; }
+      if (name === "skills" && ["search", "preview", "install"].includes(action)) {
+        const { handleMarketplaceCommand } = await import("./marketplace.js");
+        await handleMarketplaceCommand(action, argument.slice(action.length).trim(), project,
+          { write: state.settings.permissions.write, planMode: state.planMode }, io);
+        return handled;
+      }
       if (action === "show" && parts.length === 2) {
         print(await describeCapability(project, kind, parts[1]!));
         return handled;
@@ -210,7 +217,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
         if (!task) throw new Error("Usage: /agents run ID TASK");
         return { kind: "task", task, specialistId: id };
       }
-      throw new Error(`Usage: /${name} [show ID | use ${kind === "skills" ? "ID...|none" : "ID|off"} | run ID TASK | create DESCRIPTION]`);
+      throw new Error(`Usage: /${name} [show ID | use ${kind === "skills" ? "ID...|none" : "ID|off"} | run ID TASK | create DESCRIPTION${kind === "skills" ? " | search QUERY | preview OWNER/REPO@SKILL | install OWNER/REPO@SKILL" : ""}]`);
     }
     case "permissions": {
       if (!argument) { print({ configured: state.settings.permissions, planMode: state.planMode, approval: "Every mutation requires exact-action approval." }); return handled; }

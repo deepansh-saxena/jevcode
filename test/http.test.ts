@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
-import { postJson } from "../src/http.js";
+import { getJson, getText, postJson } from "../src/http.js";
 import { server } from "./helpers.js";
 
 test("HTTP timeouts survive garbage collection while stalled headers or bodies are pending", async () => {
@@ -64,9 +64,27 @@ test("HTTP rejects redirects and bounds decompressed responses without exposing 
     response.writeHead(200, { "Content-Encoding": "gzip" });
     response.end(gzipSync(request.url === "/overflow" ? "x".repeat(2_000_001) : '{"ok":true}'));
   });
+
   const signal = new AbortController().signal;
   assert.deepEqual(await postJson(`${url}/gzip`, "fake", {}, signal, 1000), { ok: true });
   await assert.rejects(postJson(`${url}/overflow`, "fake", {}, signal, 1000), /size limit/);
   await assert.rejects(postJson(`${url}/redirect`, "fake", {}, signal, 1000), /HTTP 302/);
   assert.equal(followed, false);
+});
+
+test("public GET requests carry no credentials, enforce limits and support cancellation", async (t) => {
+  const url = await server(t, (request, response) => {
+    assert.equal(request.method, "GET");
+    assert.equal(request.headers.authorization, undefined);
+    assert.equal(request.headers.cookie, undefined);
+    assert.equal(request.headers["user-agent"], "jev-code");
+    if (request.url === "/stall") { response.writeHead(200); response.write("pending"); return; }
+    if (request.url === "/binary") { response.end(Buffer.from([0xff])); return; }
+    response.end('{"ok":true}');
+  });
+  const signal = new AbortController().signal;
+  assert.deepEqual(await getJson(url, signal), { ok: true });
+  assert.equal(await getText(url, signal), '{"ok":true}');
+  await assert.rejects(getText(`${url}/binary`, signal), /encoded data/);
+  await assert.rejects(getText(`${url}/stall`, signal, 50), /timed out/);
 });

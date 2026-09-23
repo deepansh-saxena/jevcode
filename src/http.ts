@@ -22,6 +22,31 @@ export class HttpError extends Error {
 export async function postJson(
   url: string, authorization: string, body: unknown, signal: AbortSignal, timeoutMs: number,
 ): Promise<unknown> {
+  return parseJson(await requestBytes(url, "POST", {
+    Authorization: authorization, "Content-Type": "application/json",
+  }, JSON.stringify(body), signal, timeoutMs));
+}
+
+export async function getText(url: string, signal: AbortSignal, timeoutMs = 15_000): Promise<string> {
+  const bytes = await requestBytes(url, "GET", { Accept: "application/json, text/plain", "User-Agent": "jev-code" },
+    undefined, signal, timeoutMs);
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+}
+
+export async function getJson(url: string, signal: AbortSignal, timeoutMs = 15_000): Promise<unknown> {
+  return parseJson(await getText(url, signal, timeoutMs));
+}
+
+function parseJson(content: string | Buffer): unknown {
+  try { return JSON.parse(content.toString()) as unknown; }
+  catch (error) {
+    if (error instanceof SyntaxError) throw new Error("API returned invalid JSON");
+    throw error;
+  }
+}
+
+async function requestBytes(url: string, method: "GET" | "POST", headers: Record<string, string>,
+  body: string | undefined, signal: AbortSignal, timeoutMs: number): Promise<Buffer> {
   signal.throwIfAborted();
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
     throw new RangeError("HTTP timeout must be an integer between 0 and 2147483647 milliseconds");
@@ -30,10 +55,8 @@ export async function postJson(
   if (!["http:", "https:"].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
     throw new Error("API endpoint must be HTTP(S) without embedded credentials");
   }
-  const serialized = JSON.stringify(body);
   const request = (endpoint.protocol === "https:" ? httpsRequest : httpRequest)(endpoint, {
-    method: "POST",
-    headers: { Authorization: authorization, "Content-Type": "application/json", "Accept-Encoding": "gzip, deflate, br" },
+    method, headers: { ...headers, "Accept-Encoding": "gzip, deflate, br" },
   });
   let response: IncomingMessage | undefined;
   let stopped: unknown;
@@ -48,7 +71,7 @@ export async function postJson(
     response = await new Promise<IncomingMessage>((resolve, reject) => {
       request.once("response", resolve);
       request.once("error", reject);
-      request.end(serialized);
+      request.end(body);
     });
     const status = response.statusCode ?? 0;
     if (status < 200 || status >= 300) throw new HttpError(status);
@@ -74,12 +97,7 @@ export async function postJson(
       }
     }
     if (stopped !== undefined) throw stopped;
-    try {
-      return JSON.parse(content.toString("utf8")) as unknown;
-    } catch (error) {
-      if (error instanceof SyntaxError) throw new Error("API returned invalid JSON");
-      throw error;
-    }
+    return content;
   } catch (error) {
     throw stopped ?? error;
   } finally {

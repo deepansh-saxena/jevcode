@@ -276,6 +276,63 @@ execution. After-hook failure explicitly reports that the action already
 executed and is not rolled back. After hooks run only for actions whose
 execution returned successfully. No hook can autoapprove another action.
 
+## Public skills marketplace
+
+Search [skills.sh](https://skills.sh) from chat or an initialized workspace:
+
+```text
+/skills search testing
+/skills preview OWNER/REPO@SKILL
+/skills install OWNER/REPO@SKILL
+```
+
+```sh
+jevcode skills search testing
+jevcode skills preview OWNER/REPO@SKILL
+jevcode skills install OWNER/REPO@SKILL --write
+```
+
+Use a reference returned by search. Search sends only your query to skills.sh;
+do not include private information. Preview/install fetch public GitHub metadata
+and raw files without credentials, cookies, telemetry, redirects, subprocesses,
+`npx`, Git hooks, or retries. GitHub's anonymous rate limits apply; failures are
+reported rather than disguised as empty results. No coding model or Jev call is
+needed.
+
+Preview resolves the repository's default branch once to a full commit SHA and
+checks each downloaded file against its Git blob hash. Append `#FULL_COMMIT_SHA`
+to reuse a specific revision. A preview command does not reserve that revision
+for a later install unless you supply the SHA; install always shows the exact
+revision and complete files it will write before asking for approval.
+
+Installation needs edit permission outside plan mode and fresh explicit
+confirmation. Piped input cannot authorize a standalone CLI installation.
+It writes only a new `.jev/skills/NAME/` directory, never overwrites or shadows
+an existing skill, and publishes `SKILL.md` after supporting files are written.
+New skills become available immediately and survive reload. The private
+`.jev-marketplace.json` receipt records source, commit, and file SHA-256 hashes;
+`/skills show NAME` includes this provenance. The receipt is an installation
+record, not a signature or a guarantee that local files remain unchanged.
+
+Public instructions can influence future agent behavior. Review all content,
+the publisher, and the license; install counts are popularity, not trust.
+Supporting scripts remain non-executable files and are never run by installation.
+Using them later still requires the normal command permissions and approval.
+Skills cannot install tools, grant privileges, or bypass protected paths.
+
+The same strict supported frontmatter applies. Symlinks, submodules, binary
+resources, protected/credential paths, ambiguous or incomplete repository trees,
+nested skills, and case-colliding files are rejected. Limits: 17 files including
+`SKILL.md`, four resource-directory levels, 80 KB total downloaded content and
+96,000 characters for complete review. Some public skills exceed these limits
+or use unsupported frontmatter; Jev rejects them rather than silently stripping
+content. Skill lookup uses the marketplace's folder slug (or a matching root
+`SKILL.md`), not arbitrary repository-wide script execution.
+
+This integration does not publish skills, install globally, auto-update, remove
+existing skills, or discover/install skills on the model's behalf. Updating or
+removing a skill remains an explicit local-file maintenance operation.
+
 ## Integration API
 
 `new ExtensionHost(project)` owns passive declarations and session-only trust.

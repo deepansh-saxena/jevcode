@@ -109,6 +109,14 @@ export const configSchema = z.object({
 });
 export type Config = z.infer<typeof configSchema>;
 
+export const marketplaceOriginSchema = z.object({
+  marketplace: z.literal("skills.sh"),
+  source: z.string().regex(/^[a-zA-Z0-9-]{1,39}\/[a-zA-Z0-9_.-]{1,100}$/),
+  commit: z.string().regex(/^[a-f0-9]{40}$/),
+  directory: z.string().max(1000),
+  files: z.record(z.string(), z.string().regex(/^[a-f0-9]{64}$/)),
+}).strict();
+
 export const skillSchema = z.object({
   id: idSchema,
   version: z.string().min(1),
@@ -128,6 +136,7 @@ export interface CapabilityProvenance {
   source: string;
   root: string;
   pluginId?: string;
+  marketplace?: z.infer<typeof marketplaceOriginSchema>;
 }
 export type Skill = z.infer<typeof skillSchema> & { provenance?: CapabilityProvenance };
 

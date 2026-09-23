@@ -101,6 +101,8 @@ real local stdio/VS Code client.
 | `/skills`, `/agents` | List installed skills or specialists |
 | `/skills show ID`, `/agents show ID` | Inspect a definition; skill display includes its instructions |
 | `/skills create DESCRIPTION`, `/agents create DESCRIPTION` | Ask the coding model to author a new persistent capability; requires edit permission and review |
+| `/skills search QUERY` | Search the public skills.sh catalog; sends only your query |
+| `/skills preview OWNER/REPO@SKILL`, `/skills install OWNER/REPO@SKILL` | Inspect a commit-pinned public GitHub skill; installation requires edit permission and full-file approval |
 | `/SKILL_ID [task]`, `/skills run ID [task]` | Load a skill for one task; use the longer form if its name conflicts with a built-in command |
 | `/agents run ID TASK` | Explicitly run a specialist before the main agent for one task |
 | `/skills use ID...`, `/skills use none` | Set or clear pinned optional skills for subsequent tasks; mandatory skills always apply |
@@ -184,9 +186,15 @@ shell jobs, harness-edit undo, real image input, plain/full-screen terminals, an
 a JSONL protocol with a small VS Code development client. The coding benchmark
 now measures executable fixture acceptance rather than answer text alone.
 
+Public skill discovery and reviewed project-local installation use skills.sh;
+`jevcode skills search QUERY`, `jevcode skills preview OWNER/REPO@SKILL`, and
+interactive `jevcode skills install OWNER/REPO@SKILL --write` work without model
+credentials in an initialized workspace. No remote installer or setup script is
+executed. Public skills are untrusted; popularity is not a safety endorsement.
+
 See [extensions](docs/extensions.md), [execution and budgets](docs/execution.md),
 [terminal/editor integration](docs/interactive.md), and
-[coding evaluation](docs/evaluation.md). Limits remain explicit: no marketplace,
+[coding evaluation](docs/evaluation.md). Limits remain explicit: no marketplace publishing or automatic updates,
 MCP OAuth or full MCP protocol surface, nested agents, persistent jobs/undo,
 arbitrary Claude frontmatter compatibility, or published IDE extension.
 Docker isolation is opt-in and fake-driver tested, not a verified deployment
