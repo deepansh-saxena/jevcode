@@ -5,8 +5,11 @@ import { createCodingModel, type CodingModel, type Message } from "./llm.js";
 import type { RunOptions, RunResult } from "./runtime.js";
 import { createTools, toolSpecs } from "./tools.js";
 import { capabilityCatalog, capabilityTools, describeCapability, reloadCapabilities } from "./capabilities.js";
-import { listSessions, restoreSession, saveSession } from "./session.js";
+import { latestSession, listSessions, restoreSession, saveSession } from "./session.js";
 import { compactConversation, contextSize } from "./context.js";
+import { handleExtensionCommand, type ExtensionHost } from "./extensions.js";
+import { readImage, requireImageSupport, MAX_IMAGES, type ImageAttachment } from "./media.js";
+import { exportTranscript, workspaceDiff } from "./chat-files.js";
 
 const commands: Record<string, string> = {
   help: "Show commands; Tab completes commands and installed skill names",
@@ -15,7 +18,7 @@ const commands: Record<string, string> = {
   new: "Alias for /clear",
   skills: "List skills; show ID | use ID... | use none | run ID [task] | create DESCRIPTION",
   agents: "List specialists; show ID | use ID | use off | run ID TASK | create DESCRIPTION",
-  permissions: "Show permissions, or set read-only | edit | commands | all (approval required to enable)",
+  permissions: "Show permissions, or set read-only | edit | commands | all | external (fresh approval to enable)",
   plan: "Toggle planning, or set on | off; planning disables all writes and commands",
   model: "Show model, or set ID for this chat (changing model clears context after confirmation)",
   models: "List bundled account-model IDs, not live account availability",
@@ -25,13 +28,24 @@ const commands: Record<string, string> = {
   cost: "Alias for /usage; dollar costs are unknown",
   config: "Show this chat's configuration without credential values",
   commands: "List configured executable commands; executions still require approval",
+  plugins: "List local plugins, or enable|disable ID (fresh session-only trust)",
+  mcp: "List/status MCP servers, or connect|disconnect ID (external permission and trust required)",
+  hooks: "List hooks, or enable|disable ID (external permission and trust required)",
   doctor: "Check registries and local credential availability without making model requests",
   reload: "Reload capabilities and AGENTS.md; retain session settings",
   review: "Run a read-only review; optional scope text",
   jev: "Set routing off | shadow | on for this chat; guardrails are unchanged",
-  save: "Confirm saving a private unencrypted conversation snapshot",
+  save: "Confirm saving a private unencrypted conversation snapshot; optional NAME",
   sessions: "List private saved snapshots and resume UUIDs",
   resume: "List saved snapshots, or load UUID for this workspace/provider/model",
+  continue: "Restore the most recently saved snapshot (never implicitly persisted)",
+  name: "Set the name included in future explicit snapshots",
+  attach: "Attach a workspace image to the next task after provider-sharing confirmation",
+  detach: "Discard pending image attachments",
+  editor: "Compose a prompt using explicitly configured JEV_EDITOR; preview and confirm before sending",
+  diff: "Show bounded tracked git changes against HEAD, omitting protected paths",
+  export: "Confirm exporting user/assistant text to a new private workspace file",
+  "auto-compact": "Opt into between-turn semantic compaction: on | off",
   exit: "Leave the chat",
   quit: "Alias for /exit",
 };
@@ -45,6 +59,10 @@ export interface ChatState {
   runs: number;
   compactions: number;
   metrics: RunResult["metrics"];
+  extensions?: ExtensionHost;
+  attachments?: ImageAttachment[];
+  name?: string;
+  autoCompact?: boolean;
 }
 
 export function newChatMetrics(): RunResult["metrics"] {
@@ -65,10 +83,11 @@ export function recordRun(state: ChatState, result: RunResult): void {
 
 export function commandCompletions(project: Project, line: string): [string[], string] {
   if (!line.startsWith("/")) return [[], line];
-  let candidates = [...Object.keys(commands), ...project.skills.map((skill) => skill.id)].map((name) => `/${name}`);
+  let candidates = [...Object.keys(commands), ...project.skills.filter((skill) => skill.userInvocable !== false).map((skill) => skill.id)].map((name) => `/${name}`);
   const match = /^(\/(?:skills (?:show|use|run)|agents (?:show|use|run)) )(\S*)$/.exec(line);
   if (match) {
-    const items = match[1]!.startsWith("/skills") ? project.skills : project.specialists;
+    const items = match[1]!.startsWith("/skills") ? project.skills.filter((skill) =>
+      match[1]!.includes("show") || skill.userInvocable !== false) : project.specialists;
     candidates = items.map((item) => `${match[1]}${item.id}`);
   }
   return [[...new Set(candidates)].filter((candidate) => candidate.startsWith(line)).sort(), line];
@@ -76,16 +95,19 @@ export function commandCompletions(project: Project, line: string): [string[], s
 
 export interface CommandIO {
   write: (text: string) => void;
-  confirm: (prompt: string) => Promise<boolean>;
+  confirm: (prompt: string, signal?: AbortSignal) => Promise<boolean>;
   signal: AbortSignal;
+  editor?: () => Promise<string>;
 }
 
 export type ChatCommandResult =
   | { kind: "handled" }
   | { kind: "exit" }
-  | { kind: "task"; task: string; skills?: string[]; specialistId?: string; readOnly?: boolean };
+  | { kind: "task"; task: string; skills?: string[]; specialistId?: string; readOnly?: boolean; skillArguments?: Record<string, string> };
 
 export async function handleChatCommand(line: string, state: ChatState, io: CommandIO): Promise<ChatCommandResult> {
+  if (state.extensions && await handleExtensionCommand(line, state.extensions, { ...io,
+    permissions: state.settings.permissions, planMode: state.planMode })) return { kind: "handled" };
   if (!line.startsWith("/")) return { kind: "task", task: line };
   const space = line.search(/\s/);
   const name = line.slice(1, space < 0 ? undefined : space);
@@ -97,8 +119,8 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
   const noArguments = (): void => { if (argument) throw new Error(`/${name} does not take arguments`); };
   const skillTask = async (id: string, task: string): Promise<ChatCommandResult> => {
     const skills = [...new Set([...(state.settings.skills ?? []), id])];
-    await loadSkills(project, skills);
-    return { kind: "task", task: task || `Follow the ${id} skill for this project.`, skills };
+    await loadSkills(project, skills, { arguments: { [id]: task } });
+    return { kind: "task", task: task || `Follow the ${id} skill for this project.`, skills, skillArguments: { [id]: task } };
   };
   if (!Object.hasOwn(commands, name)) {
     if (project.skills.some((skill) => skill.id === name)) return skillTask(name, argument);
@@ -111,12 +133,13 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     case "help":
       noArguments();
       io.write(`${Object.entries(commands).map(([id, description]) => `/${id.padEnd(12)} ${description}`).join("\n")}\n`);
-      io.write(`Installed skill commands: ${project.skills.map(({ id }) =>
+      io.write(`Installed skill commands: ${project.skills.filter((skill) => skill.userInvocable !== false).map(({ id }) =>
         Object.hasOwn(commands, id) ? `/skills run ${id}` : `/${id}`).join(", ") || "(none)"}\n`);
       return handled;
     case "clear": case "new":
       noArguments();
       state.messages = [];
+      state.attachments = [];
       io.write("Conversation cleared; workspace files and session permissions are unchanged.\n");
       return handled;
     case "status":
@@ -175,8 +198,16 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     }
     case "permissions": {
       if (!argument) { print({ configured: state.settings.permissions, planMode: state.planMode, approval: "Every mutation requires exact-action approval." }); return handled; }
-      const mode = z.enum(["read-only", "edit", "commands", "all"]).safeParse(argument);
-      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all");
+      const mode = z.enum(["read-only", "edit", "commands", "all", "external"]).safeParse(argument);
+      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all|external");
+      if (mode.data === "external") {
+        if (state.planMode) throw new Error("External permission cannot be enabled in plan mode");
+        if (!await io.confirm("Enable external extension controls? Unsandboxed MCP and hooks each require separate trust; every MCP call requires approval. Type yes: ")) return handled;
+        io.signal.throwIfAborted();
+        state.settings.permissions = { ...state.settings.permissions, external: true };
+        io.write("External permission enabled; servers and hooks remain untrusted until explicitly enabled.\n");
+        return handled;
+      }
       const permissions = { write: ["edit", "all"].includes(mode.data), commands: ["commands", "all"].includes(mode.data) };
       if ((permissions.write && !state.settings.permissions.write) || (permissions.commands && !state.settings.permissions.commands)) {
         if (!await io.confirm(`Enable ${mode.data} tools for this chat? Commands are NOT sandboxed; each mutation still needs approval. Type yes: `)) {
@@ -185,6 +216,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       }
       io.signal.throwIfAborted();
       state.settings.permissions = permissions;
+      await state.extensions?.cancel();
       io.write(`Permissions: ${mode.data}.${state.planMode ? " Plan mode still forces read-only tools." : ""} No action is preapproved.\n`);
       return handled;
     }
@@ -198,6 +230,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       }
       io.signal.throwIfAborted();
       state.planMode = enabled;
+      if (enabled) await state.extensions?.cancel();
       io.write(`Plan mode ${enabled ? "on: inspect and propose, no writes or commands" : "off: normal task execution within current permissions"}.\n`);
       return handled;
     }
@@ -214,6 +247,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       state.model = model;
       project.config.llm = config;
       state.messages = [];
+      state.attachments = [];
       io.write(`Model set to ${argument} for this chat; context cleared. Account access is verified on the next request.\n`);
       return handled;
     }
@@ -294,13 +328,68 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       return handled;
     }
     case "save":
-      noArguments();
+      if (argument.length > 80) throw new Error("Session names must be at most 80 characters");
       if (!await io.confirm("Save conversation, file contents, and provider history unencrypted in a private local snapshot? Type yes: ")) {
         io.write("Not saved.\n"); return handled;
       }
       io.signal.throwIfAborted();
-      io.write(`Saved. Resume with: jevcode --resume ${await saveSession(project, state.messages, state.model)}\n`);
+      io.write(`Saved. Resume with: jevcode --resume ${await saveSession(project, state.messages, state.model, argument || state.name)}\n`);
       return handled;
+    case "name":
+      if (!argument || argument.length > 80) throw new Error("Usage: /name NAME (1-80 characters)");
+      state.name = argument;
+      io.write("Session named; nothing saved until /save.\n");
+      return handled;
+    case "attach": {
+      if (!argument) throw new Error("Usage: /attach workspace-relative-image.png");
+      if ((state.attachments?.length ?? 0) >= MAX_IMAGES) throw new Error(`At most ${MAX_IMAGES} images per task`);
+      const image = await readImage(project.workspace, argument);
+      requireImageSupport(state.model, project.config.llm.model, [image]);
+      if (!await io.confirm(`Send this ${image.mimeType} image (${Buffer.byteLength(image.data, "base64")} bytes) to ${project.config.llm.provider}/${project.config.llm.model} with your next task? Type yes: `)) {
+        io.write("Image not attached.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      (state.attachments ??= []).push(image);
+      io.write(`Attached image ${state.attachments.length}; /detach discards pending images. Image bytes are not sent to Jev routing or event logs.\n`);
+      return handled;
+    }
+    case "detach":
+      noArguments(); state.attachments = []; io.write("Pending images discarded.\n"); return handled;
+    case "editor": {
+      noArguments();
+      if (!io.editor) throw new Error("External editing is only available in the interactive terminal");
+      const prompt = await io.editor();
+      io.write(`Editor prompt preview:\n${prompt}\n`);
+      if (!await io.confirm("Send this editor prompt to the coding model? Type yes: ")) {
+        io.write("Editor prompt discarded.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      return { kind: "task", task: prompt };
+    }
+    case "diff":
+      noArguments(); io.write(await workspaceDiff(project, io.signal)); return handled;
+    case "export":
+      if (!argument) throw new Error("Usage: /export NEW_WORKSPACE_FILE");
+      await project.workspace.path(argument, true);
+      if (!await io.confirm("Export user/assistant conversation text (may contain private source code) to a new unencrypted local file? Type yes: ")) {
+        io.write("Not exported.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      await exportTranscript(project, argument, state.messages);
+      io.write("Transcript exported privately; image bytes and tool/system messages omitted.\n");
+      return handled;
+    case "auto-compact":
+      if (argument !== "on" && argument !== "off") throw new Error("Usage: /auto-compact on|off");
+      if (argument === "on" && !state.autoCompact && !await io.confirm("Allow automatic model summaries between turns at 65% context usage? This uses tokens and may omit older detail. Nothing is saved automatically. Type yes: ")) {
+        io.write("Automatic compaction unchanged.\n"); return handled;
+      }
+      io.signal.throwIfAborted();
+      state.autoCompact = argument === "on";
+      io.write(`Automatic between-turn compaction ${argument}.\n`);
+      return handled;
+    case "continue":
+      noArguments();
+      return handleChatCommand(`/resume ${await latestSession(project)}`, state, io);
     case "sessions": case "resume":
       if (!argument) { print(await listSessions(project)); return handled; }
       if (name === "sessions" || parts.length !== 1) throw new Error(`Usage: /${name}${name === "resume" ? " [UUID]" : ""}`);
@@ -309,6 +398,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       }
       io.signal.throwIfAborted();
       state.messages = await restoreSession(project, argument, state.model);
+      state.attachments = [];
       io.write("Saved conversation restored. Current permissions and project instructions still apply.\n");
       return handled;
     default:

@@ -37,37 +37,40 @@ test("registry rejects duplicate IDs", async (t) => {
   const root = project.workspace.root;
   const original = await readFile(path.join(root, ".jev/skills/coding.json"));
   await writeFile(path.join(root, ".jev/skills/duplicate.json"), original);
-  await assert.rejects(loadProject(root), /Duplicate skill/);
+  await assert.rejects(loadProject(root, { globalRoot: null }), /Duplicate skill/);
 });
 
 test("selected skill resources share the context budget and command references never grant permissions", async (t) => {
   const project = await fixture(t);
   await writeFile(path.join(project.workspace.root, ".jev/skills/reference.txt"), "Resource-specific convention");
-  const skill = { ...project.skills.find((candidate) => candidate.id === "testing")!,
+  const { provenance: _provenance, ...definition } = project.skills.find((candidate) => candidate.id === "testing")!;
+  const skill = { ...definition,
     resources: [".jev/skills/reference.txt"], commandIds: ["test"] };
   await writeFile(path.join(project.workspace.root, ".jev/skills/testing.json"), JSON.stringify(skill));
-  const loaded = await loadProject(project.workspace.root);
+  const loaded = await loadProject(project.workspace.root, { globalRoot: null });
   assert.doesNotMatch((await loadSkills(loaded, [])).text, /Resource-specific/);
   assert.match((await loadSkills(loaded, ["testing"])).text, /Resource-specific/);
   assert.ok(!createTools(loaded.workspace, loaded.config, { write: false, commands: false }).some((tool) => tool.name === "run_command"));
   loaded.config.limits.maxSkillChars = 10;
   await assert.rejects(loadSkills(loaded, ["testing"]), /budget/);
   await writeFile(path.join(project.workspace.root, ".jev/skills/testing.json"), JSON.stringify({ ...skill, commandIds: ["missing"] }));
-  await assert.rejects(loadProject(project.workspace.root), /unknown configured command/);
+  await assert.rejects(loadProject(project.workspace.root, { globalRoot: null }), /unknown configured command/);
   await writeFile(path.join(project.workspace.root, ".jev/skills/testing.json"), JSON.stringify({ ...skill, resources: [".jev/skills/../../file"] }));
-  await assert.rejects(loadProject(project.workspace.root), /traversal/);
+  await assert.rejects(loadProject(project.workspace.root, { globalRoot: null }), /traversal/);
 });
 test("registry rejects unknown specialist skills and escaping instruction paths", async (t) => {
   const project = await fixture(t);
   const root = project.workspace.root;
-  const specialist = { ...project.specialists[0], skills: ["missing"] };
+  const { provenance: _agentProvenance, ...agent } = project.specialists[0]!;
+  const { provenance: _skillProvenance, ...skill } = project.skills[0]!;
+  const specialist = { ...agent, skills: ["missing"] };
   await writeFile(path.join(root, ".jev/specialists/investigator.json"), JSON.stringify(specialist));
-  await assert.rejects(loadProject(root), /Unknown skill/);
-  await writeFile(path.join(root, ".jev/specialists/investigator.json"), JSON.stringify(project.specialists[0]));
+  await assert.rejects(loadProject(root, { globalRoot: null }), /Unknown skill/);
+  await writeFile(path.join(root, ".jev/specialists/investigator.json"), JSON.stringify(agent));
   await writeFile(path.join(root, ".jev/skills/coding.json"), JSON.stringify({
-    ...project.skills[0], instructions: ".jev/skills/../../../outside",
+    ...skill, instructions: ".jev/skills/../../../outside",
   }));
-  await assert.rejects(loadProject(root), /traversal/);
+  await assert.rejects(loadProject(root, { globalRoot: null }), /traversal/);
 });
 
 test("workspace rejects escapes, protected paths, symlinks, and hard links", async (t) => {

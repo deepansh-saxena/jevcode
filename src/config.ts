@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { extensionsSchema } from "./extension-config.js";
 
 export const idSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
 export const executionToolNames = [
@@ -6,9 +7,9 @@ export const executionToolNames = [
   "exec_command", "task_list", "task_read", "task_wait", "task_stop", "list_checkpoints", "undo_edit",
 ] as const;
 export const toolNames = [
-  ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task", "delegate_parallel",
+  ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task", "delegate_parallel", "ask_user",
 ] as const;
-export type ToolName = (typeof toolNames)[number];
+export type ToolName = (typeof toolNames)[number] | "load_skill_resource" | `mcp__${string}`;
 
 export const commandSchema = z.object({
   description: z.string().min(1).max(1000),
@@ -95,6 +96,7 @@ export const configSchema = z.object({
     value.split("/").every((part) => part !== "" && part !== "." && part !== ".."),
   "Use normalized workspace-relative file or directory paths")).default([]),
   commands: z.record(idSchema, commandSchema).default({}),
+  extensions: extensionsSchema.optional(),
   execution: executionSchema.prefault({}),
   spend: spendSchema.prefault({}),
 }).strict().superRefine((value, context) => {
@@ -116,8 +118,18 @@ export const skillSchema = z.object({
   mandatory: z.boolean().default(false),
   resources: z.array(z.string().min(1)).max(16).optional(),
   commandIds: z.array(idSchema).max(16).optional(),
+  modelInvocable: z.boolean().optional(),
+  userInvocable: z.boolean().optional(),
+  argumentHint: z.string().max(1000).optional(),
 }).strict();
-export type Skill = z.infer<typeof skillSchema>;
+export interface CapabilityProvenance {
+  scope: "project" | "user" | "plugin";
+  format: "json" | "skill-md" | "claude-command" | "claude-agent";
+  source: string;
+  root: string;
+  pluginId?: string;
+}
+export type Skill = z.infer<typeof skillSchema> & { provenance?: CapabilityProvenance };
 
 export const specialistSchema = z.object({
   id: idSchema,
@@ -130,4 +142,4 @@ export const specialistSchema = z.object({
   maxToolCalls: z.number().int().min(1).max(40).default(10),
   resultFormat: z.enum(["text", "structured"]).optional(),
 }).strict();
-export type Specialist = z.infer<typeof specialistSchema>;
+export type Specialist = z.infer<typeof specialistSchema> & { provenance?: CapabilityProvenance };

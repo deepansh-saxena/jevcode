@@ -8,6 +8,7 @@ import { z } from "zod";
 import type { AccountProvider, AuthManager } from "./auth.js";
 import type { Config } from "./config.js";
 import type { CodingModel, Completion, Message, ToolSpec } from "./llm.js";
+import { requireImageSupport } from "./media.js";
 
 export const defaultAccountModels: Record<AccountProvider, string> = {
   "github-copilot": "gpt-4.1",
@@ -92,6 +93,10 @@ export class SubscriptionModel implements CodingModel {
     private transport: SubscriptionTransport = subscriptionTransport,
   ) {}
 
+  supportsImages(model: string): boolean {
+    return accountModel(this.provider, model).input.includes("image");
+  }
+
   exportHistory(messages: Message[]): unknown {
     return messages.filter((message) => message.role === "assistant").map((message) =>
       nativeMessageSchema.parse(this.history.get(message)));
@@ -148,7 +153,10 @@ export class SubscriptionModel implements CodingModel {
         context.messages.push(native);
         for (const call of message.tool_calls ?? []) toolNames.set(call.id, call.function.name);
       } else if (message.role === "user") {
-        context.messages.push({ role: "user", content: message.content ?? "", timestamp: 0 });
+        context.messages.push({ role: "user", content: message.images?.length ? [
+          { type: "text", text: message.content ?? "" },
+          ...message.images.map((image) => ({ type: "image" as const, ...image })),
+        ] : message.content ?? "", timestamp: 0 });
       } else {
         const name = message.tool_call_id ? toolNames.get(message.tool_call_id) : undefined;
         if (!name || !message.tool_call_id) throw new Error("Tool result has no matching subscription tool call");
@@ -165,7 +173,10 @@ export class SubscriptionModel implements CodingModel {
   }
 
   contextSize(messages: Message[], tools: ToolSpec[]): number {
-    return JSON.stringify(this.context(messages, tools)).length;
+    const context = this.context(messages, tools);
+    return JSON.stringify({ ...context, messages: context.messages.map((message) =>
+      message.role === "user" && Array.isArray(message.content) ? { ...message, content: message.content.map((block) =>
+        block.type === "image" ? { ...block, data: " ".repeat(16_384) } : block) } : message) }).length;
   }
 
   async ready(signal: AbortSignal): Promise<void> {
@@ -177,6 +188,10 @@ export class SubscriptionModel implements CodingModel {
     const deadline = AbortSignal.any([signal, AbortSignal.timeout(this.config.timeoutMs)]);
     deadline.throwIfAborted();
     const base = accountModel(this.provider, modelId);
+    for (const message of messages) if (message.images?.length) {
+      if (message.role !== "user") throw new Error("Images are only supported in user messages");
+      requireImageSupport(this, modelId, message.images);
+    }
     const credentials = await this.auth.credentials(this.provider, deadline);
     const oauth = getOAuthProvider(this.provider);
     if (!oauth) throw new Error("Subscription authentication adapter is unavailable");

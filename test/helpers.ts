@@ -12,7 +12,7 @@ export async function fixture(t: TestContext): Promise<Project> {
   const root = await mkdtemp(path.join(tmpdir(), "jev-code-test-"));
   t.after(async () => rm(root, { recursive: true, force: true }));
   await initialize(root);
-  return loadProject(root);
+  return loadProject(root, { globalRoot: null });
 }
 
 export function final(text = "Done"): Completion {

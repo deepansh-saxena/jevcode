@@ -68,7 +68,7 @@ test("interactive Jev setup validates a hidden key then persists consent and act
   assert.match(result.stdout, /Jev routing on/);
   assert.match(result.stdout, /using the newly entered key/);
   assert.equal(await readJevKey(project.workspace.root), "SYNTHETIC_JEV_KEY_VALUE");
-  const config = (await loadProject(project.workspace.root)).config;
+  const config = (await loadProject(project.workspace.root, { globalRoot: null })).config;
   assert.equal(config.jev.allowDataSharing, true);
   assert.equal(config.jev.mode, "on");
   assert.equal(config.jev.guardrail, "off");
@@ -98,5 +98,5 @@ test("failed Jev connection tests do not save keys or activate routing", {
     return true;
   });
   assert.equal(await readJevKey(project.workspace.root), undefined);
-  assert.equal((await loadProject(project.workspace.root)).config.jev.mode, "off");
+  assert.equal((await loadProject(project.workspace.root, { globalRoot: null })).config.jev.mode, "off");
 });

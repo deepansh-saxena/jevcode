@@ -121,7 +121,7 @@ test("credential directory and credential-root workspaces are inaccessible to fi
 test("successful login selection persists without clobbering other settings or concurrent edits", async (t) => {
   const project = await fixture(t);
   await selectAccountProvider(project, "github-copilot", "gpt-4.1");
-  const loaded = await loadProject(project.workspace.root);
+  const loaded = await loadProject(project.workspace.root, { globalRoot: null });
   assert.equal(loaded.config.llm.provider, "github-copilot");
   assert.equal(loaded.config.llm.model, "gpt-4.1");
   assert.deepEqual(loaded.config.commands, project.config.commands);
