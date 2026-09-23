@@ -1,13 +1,36 @@
 # Jev Code
 
-A standalone TypeScript coding harness with GitHub Copilot account login,
-ChatGPT/Codex account login, or an OpenAI-compatible API key, plus optional Jev
-routing. Skills are reusable instructions; specialists are separate, bounded
-agent executions that reuse those skills.
+**Give the coding model the right expertise, without loading every skill or
+spawning an agent for every task.**
 
-This is an independent local harness, not full Claude Code parity, a security
-sandbox, or a demonstrated cost/latency improvement.
-The coding LLM selects tools. Jev does not sit in front of every tool selection.
+Jev Code uses **Jev as its default decision layer** and your coding model as the
+executor. Jev makes bounded routing judgments; the coding model reasons about
+the code, chooses tools, writes changes, and integrates results.
+
+| What Jev does | Why it matters |
+| --- | --- |
+| Selects relevant **installed skills** at task intake | Loads useful instructions instead of filling context with the whole catalog |
+| Decides whether an eligible **specialist** is worthwhile | Avoids making delegation the default for simple tasks |
+| Evaluates **semantic scope checks**, when configured | Separates task-scope judgments from deterministic permissions and execution |
+
+The goal is **less unnecessary context, fewer unnecessary agent calls, and lower
+end-to-end cost and latency without sacrificing task success**. Those are
+measurable goals, not established benchmark results. Routing itself adds a
+request, so Jev will not make every task faster. Paired coding benchmarks are
+included to measure the tradeoff.
+
+Jev **does not** select each tool, generate code, grant permissions, or replace
+file-safety checks. Marketplace search currently goes directly to skills.sh;
+Jev selects among installed skills, not public search results.
+
+Start with GitHub Copilot, ChatGPT/Codex account login, or an OpenAI-compatible
+API key. New workspaces guide you through Jev setup before coding, defaulting
+to **on** after explicit sharing consent and key validation. You can explicitly
+choose off. The harness includes automatic workspace editing, reviewed skills,
+MCP integrations, specialists, and a full-screen terminal.
+
+This is an independent local harness, not full Claude Code parity or an
+OS-enforced security sandbox.
 
 ## Quick start
 
@@ -45,10 +68,14 @@ prompts, or chat messages.
 
 ```sh
 jevcode
-# Or allow approval-gated edits and configured commands:
-jevcode --write --commands
-# Full-screen multiline input (Ctrl-S submits), with separately approved shell:
-jevcode --fullscreen --write --execution
+# First launch guides Jev setup; to explicitly skip it for this session:
+jevcode --jev-off
+# Require confirmation for every edit, or disable editing:
+jevcode --confirm-edits
+jevcode --read-only
+# Enable separately approved configured commands or arbitrary shell:
+jevcode --commands
+jevcode --execution
 # One-shot/scriptable mode remains available:
 jevcode run "Explain this project's architecture"
 jevcode run --skill testing "Identify missing regression tests"
@@ -57,11 +84,16 @@ jevcode run --write "Add a regression test for the reported bug"
 jevcode run --write --commands "Fix the bug and run the configured tests"
 ```
 
-Runs are read-only by default. `--write` exposes editing tools; `--commands`
-exposes configured commands. `--execution` separately exposes arbitrary executable
-and shell commands, including attached background jobs. **Each write or command
-still requires a fresh exact-action approval.** Noninteractive runs cannot approve mutations and return a
-nonzero exit code when approval is needed. There is no blanket auto-approve flag.
+**Interactive chat enables automatic workspace edits by default.** Only
+`write_file` and `replace_text` skip individual approval; hashes, protected paths,
+semantic guardrails, hooks, and undo checkpoints still apply. Use `--read-only`,
+`--plan`, or `--confirm-edits` for stricter behavior.
+`--commands` exposes configured commands; `--execution` separately exposes
+arbitrary executables and shell jobs. **Commands, capability creation, skill
+installation, MCP setup/connections/calls, and undo still need fresh approval.**
+Scripted `run` and `serve` remain read-only by default; `run --write` still asks
+for each edit. Noninteractive runs cannot approve mutations and return a nonzero
+exit code when approval is needed. There is no blanket auto-approve flag.
 
 Use `--cwd /absolute/path/to/project` with `init`, `inspect`, `login`, or `run` to
 select another workspace. That workspace needs its own `.jev/` configuration.
@@ -88,9 +120,10 @@ Ctrl-C cancels the active turn and returns to the prompt; Ctrl-C at an idle prom
 exits. Messages typed while a turn runs are queued. They do not interrupt a tool
 or act as approvals: approval requires a new `yes` at the exact-action prompt.
 Use Ctrl-C to stop current work before sending a correction that must take effect
-immediately. Plain mode remains the default; `--fullscreen` adds a transcript,
-status line, completion menu, and multiline editor. Enter inserts a newline and
-Ctrl-S submits, including at confirmation prompts. See
+immediately. The full-screen TUI is now the default, with a workspace header,
+conversation transcript, persistent tool activity, edit-mode/token status,
+completion, and prompt history. Enter sends; Ctrl-J or Alt-Enter inserts a
+newline; Ctrl-S also sends. `--plain` selects readline (also used for `TERM=dumb`). See
 [terminal and editor integration](docs/interactive.md) for controls and the
 real local stdio/VS Code client.
 
@@ -107,7 +140,7 @@ real local stdio/VS Code client.
 | `/agents run ID TASK` | Explicitly run a specialist before the main agent for one task |
 | `/skills use ID...`, `/skills use none` | Set or clear pinned optional skills for subsequent tasks; mandatory skills always apply |
 | `/agents use ID`, `/agents use off` | Set or clear the pinned specialist; clearing a pin does not disable automatic selection |
-| `/permissions [read-only\|edit\|commands\|all\|execution\|external]` | Enable tools after fresh confirmation; `all` grants only edits and configured commands, never shell or extensions |
+| `/permissions [read-only\|edit\|commands\|all\|execution\|external\|auto-edits\|confirm-edits]` | Configure tools and edit approval; enabling automatic edits needs consent, `all` never grants shell or external permission |
 | `/plan [on\|off]` | Toggle or set read-only planning; leaving it requires confirmation when restoring enabled edit/command tools |
 | `/model [ID]`, `/models` | Show/change the session model or list the bundled account catalog; changing model clears context after confirmation |
 | `/context` | Estimate current context characters, including native history; not a token count |
@@ -126,11 +159,12 @@ real local stdio/VS Code client.
 | `/tasks`, `/task ID`, `/stop ID` | List, inspect, or stop attached work across turns |
 | `/checkpoints`, `/undo ID` | Inspect session-memory file checkpoints or approve a hash-checked undo |
 | `/mcp`, `/hooks`, `/plugins` | Discover configured extensions; each executable integration requires separate session-only trust |
+| `/mcp add playwright`, `/mcp add ID JSON` | Review and save a new MCP declaration; nothing downloads or starts until separately connected |
 | `/attach IMAGE`, `/detach` | Approve an actual image for the next coding-model task or discard attachments |
 | `/editor`, `/diff`, `/export NEW_FILE` | Compose in an explicitly configured editor, inspect tracked Git changes, or approve transcript export |
 | `/exit`, `/quit` | Leave the chat |
 
-Press Tab to complete built-in commands, installed skill commands, and IDs after
+Press Tab to complete built-in commands, marketplace skill operations, installed skill commands, and IDs after
 `/skills show|use|run` or `/agents show|use|run`. Command history stays in memory.
 `--plan` starts chat or a one-shot run in planning mode, overriding `--write` and
 `--commands` and `--execution`. Entering plan mode also stops attached shell jobs
@@ -404,8 +438,11 @@ main coding model can still load installed skills and delegate via tools.
 
 ## Jev routing and guardrails
 
-Jev is **off in newly initialized workspaces**. Set it up without putting a key
-in shell history or chat:
+**Jev is the default startup path for new workspaces.** First coding startup
+offers one-time setup (Enter selects on), explains data sharing, and validates
+your key before enabling routing. Until consent and validation succeed, the
+workspace remains setup-pending and sends no task data to Jev. Setup can also
+be run explicitly without putting a key in shell history or chat:
 
 ```sh
 jevcode jev setup
@@ -415,14 +452,23 @@ jevcode
 
 Setup asks for sharing consent and `on`/`shadow`, uses an existing environment
 key or a hidden replacement-key prompt, and makes a small connection-test request.
+Enter at the routing-mode prompt selects `on`. Guardrails remain separately
+configured; enabling routing does not automatically send edit contents for
+semantic checks.
 With explicit approval it stores the key in private
 `~/.jev-code/jev-key.json` (unencrypted, separate from OAuth credentials).
 `TYPESAFE_API_KEY` takes precedence. `jevcode jev logout` removes only the stored
 key; `jevcode jev off` disables routing without weakening required guardrails.
 The same private-file limitations as OAuth credentials apply.
+Choosing `off` during first-run setup records an explicit workspace choice and
+does not prompt again. `--jev-off` skips routing/setup for one coding session
+without persisting a change; it cannot bypass configured guardrails. Scripts and
+the stdio protocol never open setup prompts: they report missing setup/key and
+require `jevcode jev setup` or an explicit `--jev-off`. Existing workspaces retain
+their previously configured on/shadow/off setting.
 
-Setup confirmation accepts `y` or `yes` (case-insensitive); executing writes and
-commands still requires the full word `yes`. Paste only the API key from
+Setup confirmation accepts `y` or `yes` (case-insensitive); approval-gated actions
+still require the full word `yes`. Paste only the API key from
 [TypeSafe's key dashboard](https://console.typesafe.ai/keys), without quotes or
 an `Authorization`/`Bearer` prefix. Surrounding whitespace is trimmed; the adapter
 adds the required Bearer scheme itself.
@@ -509,8 +555,8 @@ action. Use only workspaces and content permitted for the configured providers.
 | `list_files` | Bounded recursive listing of accessible workspace files |
 | `read_file` | Numbered text, truncation metadata, and full-file SHA-256 |
 | `search_files` | Bounded literal text search with explicit skipped-file reports |
-| `write_file` | Approved new-file creation or whole-file replacement with expected hash |
-| `replace_text` | Approved replacement of exactly one occurrence with expected hash |
+| `write_file` | New-file creation or whole-file replacement with expected hash, under the session edit policy |
+| `replace_text` | Replacement of exactly one occurrence with expected hash, under the session edit policy |
 | `run_command` | Approved execution of a fixed command ID from configuration |
 | `exec_command` | Separately enabled and approved executable/args or shell, optionally attached in the background |
 | `task_list`, `task_read`, `task_wait`, `task_stop` | Inspect, await, or stop attached tasks without launching new work |
@@ -520,6 +566,7 @@ action. Use only workspaces and content permitted for the configured providers.
 | `load_skill_resource` | Load a selected skill's declared supporting resource under the same budget |
 | `delegate_task`, `delegate_parallel` | Sequential specialists or read-only concurrent/background specialists within shared budgets |
 | `ask_user` | Request clarification, never approval; unavailable to specialists/background runs |
+| `list_mcp_servers`, `configure_mcp`, `connect_mcp` | Discover, propose approved configuration, and request separate connection trust; new server tools appear next model turn |
 | `mcp__...` | Trusted external server tools; every call needs approval even when advertised read-only |
 | `create_skill`, `create_specialist` | Main-agent-only creation of new, reviewed project capabilities; edit permission required |
 
@@ -528,7 +575,7 @@ files. Built-in protected paths include `.jev`, `.claude`, `.jev-code`, `.git`, 
 files/directories, and `node_modules`; `protectedPaths` adds file/directory prefixes.
 The agent cannot edit `AGENTS.md` through file tools.
 
-Edits recheck the expected file version after approval, write via a temporary
+Edits recheck the expected file version immediately before execution (and after approval when required), write via a temporary
 file, and publish the replacement atomically. New files cannot overwrite an
 existing file. These checks protect ordinary local workflows; they are not an
 OS-enforced boundary against hostile concurrent filesystem changes.

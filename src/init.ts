@@ -3,7 +3,7 @@ import path from "node:path";
 import { configSchema } from "./config.js";
 import { resolvePath, Workspace } from "./workspace.js";
 
-export async function initialize(root: string): Promise<void> {
+export async function initialize(root: string, options: { jevSetup?: boolean } = {}): Promise<void> {
   const workspace = await Workspace.create(root);
   const directory = await resolvePath(workspace.root, ".jev", true);
   await mkdir(directory, { mode: 0o700 });
@@ -12,6 +12,7 @@ export async function initialize(root: string): Promise<void> {
   const config = configSchema.parse({
     version: 1,
     llm: { model: "gpt-4.1-mini" },
+    jev: { setupComplete: options.jevSetup === false },
     commands: {
       test: { description: "Run this project's npm test script (executes project code)", executable: "npm", args: ["test"] },
     },

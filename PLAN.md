@@ -15,7 +15,7 @@ and ChatGPT/Codex through the user-approved Pi authentication/transport library.
 
 Implemented: local configuration and separate skill/specialist registries,
 mandatory instruction loading, read/search/edit tools, approval-gated configured
-commands, a bounded agent loop, one-level specialists, optional Jev intake routing
+commands, a bounded agent loop, one-level specialists, Jev-first intake routing
 with shadow mode, a fail-closed semantic scope-check hook, and metadata event logs.
 Account login includes private per-user credential files, token refresh,
 status/logout, catalog discovery, and per-run provider/model overrides. Provider
@@ -79,6 +79,15 @@ The full CLI expansion also includes:
   compaction, a correlated JSONL protocol and an actual VS Code development client.
 - Repeated paired coding fixtures, fixed executable acceptance checks, exact
   initial bug reproduction and a credential-free offline preflight CLI.
+
+Interactive chat now defaults to the full-screen TUI and automatic ordinary
+workspace edits, with explicit read-only/confirm-edits modes. Commands, persistent
+capabilities, MCP setup/connections/calls, and undo remain approval-gated.
+MCP assisted setup supports a pinned official Playwright preset or reviewed
+custom declarations; adding configuration never starts or installs code.
+New workspaces start with guided Jev onboarding: on is the default choice,
+activation requires sharing consent and a validated key, and off is an explicit
+alternative. Existing on/shadow/off choices remain intact.
 
 Public skills.sh search, commit-pinned GitHub preview, and reviewed project-local
 installation are implemented. Remote skills are validated, never executed during
@@ -424,13 +433,15 @@ data as unknown, not zero.
 ## Scope boundaries and open decisions
 
 Not in the initial scope: Jev-based tool selection, autonomous agent swarms,
-recursive delegation, remote skill marketplaces, multi-user hosting, or a GUI.
+recursive delegation, multi-user hosting, or a GUI. Public skills.sh discovery
+and reviewed installation were added in the CLI expansion.
 
 Resolved for the MVP: standalone TypeScript on Node 20, Pi's agent runtime as a
 reference, Pi's provider library for Copilot/ChatGPT account access,
 OpenAI-compatible Chat Completions, and a direct Jev HTTP adapter. Initial skills
-are coding/testing, with a read-only investigator specialist. Mutations require
-per-action approval; Jev data sharing is opt-in.
+are coding/testing, with a read-only investigator specialist. Interactive
+workspace edits now follow the selected edit policy; commands and privileged
+actions require per-action approval. Jev data sharing is opt-in.
 
 Resolve before broader deployment:
 

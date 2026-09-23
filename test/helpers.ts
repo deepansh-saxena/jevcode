@@ -11,7 +11,7 @@ import type { RunOptions } from "../src/runtime.js";
 export async function fixture(t: TestContext): Promise<Project> {
   const root = await mkdtemp(path.join(tmpdir(), "jev-code-test-"));
   t.after(async () => rm(root, { recursive: true, force: true }));
-  await initialize(root);
+  await initialize(root, { jevSetup: false });
   return loadProject(root, { globalRoot: null });
 }
 

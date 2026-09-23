@@ -140,7 +140,7 @@ export function createTools(workspace: Workspace, config: Config, permissions: P
   if (permissions.write) {
     tools.push({
       name: "write_file",
-      description: "Create or replace a UTF-8 file after user approval. expectedHash must match read_file's hash; use null only for a new file. Creates parent directories.",
+      description: "Create or replace a UTF-8 file under the session's edit policy. expectedHash must match read_file's hash; use null only for a new file. Creates parent directories.",
       schema: writeSchema,
       async prepare(input) {
         const args = writeSchema.parse(input);
@@ -152,7 +152,7 @@ export function createTools(workspace: Workspace, config: Config, permissions: P
       },
     }, {
       name: "replace_text",
-      description: "Replace exactly one occurrence of oldText with newText after approval. Requires the latest complete-file SHA-256 hash.",
+      description: "Replace exactly one occurrence of oldText with newText under the session's edit policy. Requires the latest complete-file SHA-256 hash.",
       schema: replaceSchema,
       async prepare(input) {
         const args = replaceSchema.parse(input);

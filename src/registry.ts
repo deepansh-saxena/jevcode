@@ -107,7 +107,8 @@ export async function selectAccountProvider(project: Project, provider: AccountP
   await updateProjectConfig(project, (config) => { config.llm.provider = provider; config.llm.model = model; });
 }
 
-export async function updateProjectConfig(project: Project, update: (config: Config) => void): Promise<void> {
+export async function updateProjectConfig(project: Project, update: (config: Config) => void, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const filename = await resolvePath(project.workspace.root, ".jev/config.json");
   const original = await readText(filename, 64_000);
   const config = configSchema.parse(JSON.parse(original));
@@ -118,10 +119,12 @@ export async function updateProjectConfig(project: Project, update: (config: Con
   const validated = configSchema.parse(config);
   const temporary = path.join(path.dirname(filename), `.config-${randomUUID()}.tmp`);
   try {
+    signal?.throwIfAborted();
     await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     if (await readText(await resolvePath(project.workspace.root, ".jev/config.json"), 64_000) !== original) {
       throw new Error("Workspace config changed; settings were not overwritten");
     }
+    signal?.throwIfAborted();
     await rename(temporary, filename);
   } finally {
     try { await unlink(temporary); } catch (error) { if (!isMissing(error)) throw error; }

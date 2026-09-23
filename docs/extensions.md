@@ -139,11 +139,46 @@ capabilities. Plugin manifest changes block new starts/hook executions until
 disable/re-enable and fresh approval. Executable contents are not a sandbox or
 immutable package: review code and protect the directory from untrusted edits.
 
-No marketplace, remote plugin URL, installer, dependency installation, lifecycle
-script, automatic download, or cross-session trust persistence is implemented.
+Plugin marketplaces, remote plugin URLs, plugin installers/dependency installation,
+plugin lifecycle scripts, automatic downloads, and cross-session executable
+trust persistence are not implemented.
 The configured path persists; enablement and executable trust do not.
 
 ## MCP
+
+### Assisted setup
+
+The main coding agent can discover configured servers with `list_mcp_servers`,
+propose `configure_mcp`, then use `connect_mcp` when external permission is
+enabled. Configuration is always reviewed, even in automatic-edit mode. These
+management tools are unavailable to specialists, background runs, and plan mode.
+No tool can overwrite an existing server or silently enable external permission.
+
+For example, ask the agent to add Playwright for browser testing, or use:
+
+```text
+/mcp add playwright
+/permissions external
+/mcp connect playwright
+```
+
+The built-in preset is Microsoft's `@playwright/mcp@0.0.82`, invoked using
+`npx --yes --ignore-scripts` with `--headless --isolated`. Saving it only updates
+`.jev/config.json`; it does not run npm, download packages, install a browser, or
+connect. After separate connection approval, npx may download the pinned package
+and run it unsandboxed. npm lifecycle installation scripts are disabled, but the
+server itself still executes arbitrary code with your OS access. Browser
+availability is separate; missing browser dependencies fail explicitly and any
+server-provided browser installation tool still needs approval.
+
+Use `/mcp add ID JSON_SERVER_CONFIG` or the model's custom `server` input for
+other MCP implementations. Existing environment/header reference restrictions
+apply; literal credentials are rejected. Configuration updates preserve
+unrelated persisted settings and session-only model overrides. Disk conflicts,
+protected configuration paths, denied approval, and cancellation fail explicitly.
+Connecting a server during a model task refreshes its tools for the next model
+request without restarting chat. This is assisted setup, not unattended
+self-installation or permission escalation.
 
 `/permissions external` enables extension controls only after fresh consent.
 It is separate from edit permission, fixed-command permission, and
@@ -269,12 +304,14 @@ secret data fails closed instead of being sent. Hook stdout must be empty
 `deny: false` is also only no objection. No allow/permission/argument-rewrite
 fields are accepted. Stderr is never surfaced verbatim.
 
-The runtime obtains exact action approval first, then runs before hooks, then
+The runtime enforces the session approval policy first, then runs before hooks, then
 executes the unchanged action, then runs after hooks. Before-hook denial,
 invalid output, nonzero exit, timeout, I/O limit, or cancellation prevents
 execution. After-hook failure explicitly reports that the action already
 executed and is not rolled back. After hooks run only for actions whose
 execution returned successfully. No hook can autoapprove another action.
+Automatic workspace edits still run hooks when external hooks are enabled;
+only their individual edit confirmation is skipped.
 
 ## Public skills marketplace
 

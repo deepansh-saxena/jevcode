@@ -1,7 +1,8 @@
 import { z } from "zod";
 import type { Project } from "./registry.js";
+import { loadProject, updateProjectConfig } from "./registry.js";
 import type { Permissions, PreparedAction, Tool } from "./tools.js";
-import { pluginSchema, type HookConfig, type McpServerConfig } from "./extension-config.js";
+import { extensionsSchema, mcpServerSchema, pluginSchema, type HookConfig, type McpServerConfig } from "./extension-config.js";
 import { discoverAgents, discoverSkills, readCapability, safeCapabilityPath } from "./skill-catalog.js";
 import { digest, resolvePath } from "./workspace.js";
 import { BlockedError } from "./errors.js";
@@ -22,6 +23,15 @@ export interface ExtensionIO extends ExtensionContext {
 }
 type Owned<T> = { config: T; cwd: string; pluginId?: string };
 const hookResult = z.object({ deny: z.boolean().optional(), reason: z.string().max(2000).optional() }).strict();
+const serverId = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/);
+export const playwrightPreset: McpServerConfig = {
+  transport: "stdio", executable: "npx",
+  args: ["--yes", "--ignore-scripts", "@playwright/mcp@0.0.82", "--headless", "--isolated"],
+  env: {}, timeoutMs: 120_000,
+};
+const setupSchema = z.object({
+  id: serverId, preset: z.literal("playwright").optional(), server: mcpServerSchema.optional(),
+}).strict().refine((value) => Boolean(value.preset) !== Boolean(value.server), "Choose exactly one preset or server configuration");
 
 export function extensionsAllowed(context: ExtensionContext): boolean {
   return context.permissions.external === true && !context.planMode && !context.background && !context.specialist;
@@ -38,6 +48,7 @@ export class ExtensionHost {
   private activeHooks = new Set<Promise<string>>();
   private lifetime = new AbortController();
   private cancelling: Promise<void> | undefined;
+  private configuring = false;
   private closed = false;
 
   constructor(readonly project: Project, private environment: NodeJS.ProcessEnv = process.env) {
@@ -140,6 +151,98 @@ export class ExtensionHost {
     this.project.skills = this.project.skills.filter((item) => item.provenance?.pluginId !== id);
     this.project.specialists = this.project.specialists.filter((item) => item.provenance?.pluginId !== id);
     this.plugins.delete(id);
+  }
+
+  async configure(id: string, config: McpServerConfig, io: ExtensionIO): Promise<void> {
+    io = this.scopedIO(io);
+    this.usable(io, false);
+    if (!io.permissions.write) throw new BlockedError("MCP configuration requires edit permission");
+    id = serverId.parse(id);
+    config = mcpServerSchema.parse(config);
+    const validate = async (): Promise<Project> => {
+      this.usable(io, false);
+      await this.project.workspace.path(".");
+      if (this.project.workspace.protectedPaths.some((prefix) => ".jev/config.json" === prefix.toLowerCase() ||
+        ".jev/config.json".startsWith(`${prefix.toLowerCase()}/`))) throw new BlockedError("MCP configuration is protected by workspace policy");
+      if (this.servers.has(id)) throw new Error(`MCP server ${id} already exists; configuration is never overwritten`);
+      const persisted = await loadProject(this.project.workspace.root, this.project.catalogOptions);
+      if (JSON.stringify(persisted.config.extensions) !== JSON.stringify(this.project.config.extensions)) {
+        throw new Error("Extension configuration changed on disk; restart the session before adding a server");
+      }
+      return persisted;
+    };
+    await validate();
+    await this.trust(io, `Save MCP server ${id}?`, { id, server: config, path: ".jev/config.json",
+      warning: "Saves configuration only. Does not install packages, start a process, connect, or grant permissions. Connecting later may download and run unsandboxed third-party code." }, false);
+    if (this.configuring) throw new BlockedError("Another MCP configuration update is in progress; retry after it finishes");
+    this.configuring = true;
+    try {
+      const persisted = await validate();
+      const extensions = structuredClone(persisted.config.extensions ?? extensionsSchema.parse({}));
+      extensions.mcp[id] = config;
+      await updateProjectConfig(persisted, (projectConfig) => { projectConfig.extensions = extensions; }, io.signal);
+      this.project.config.extensions = extensions;
+      if (io.signal.aborted || this.closed || this.cancelling) {
+        throw new Error("MCP configuration was saved, but the session was cancelled/closed before activation; restart to load it. No server was started.");
+      }
+      this.servers.set(id, { config: structuredClone(config), cwd: this.project.workspace.root });
+    } finally {
+      this.configuring = false;
+    }
+  }
+
+  managementTools(context: ExtensionContext): Tool[] {
+    if (this.closed || context.planMode || context.background || context.specialist) return [];
+    const tools: Tool[] = [{
+      name: "list_mcp_servers",
+      description: "Inspect configured MCP servers and built-in setup presets without contacting servers. No permissions are granted.",
+      schema: z.object({}).strict(),
+      prepare: async (input) => {
+        z.object({}).strict().parse(input);
+        return { name: "list_mcp_servers", mutating: false, details: {}, execute: async () => ({
+          servers: this.status().mcp, presets: { playwright: playwrightPreset }, externalPermission: context.permissions.external === true,
+          guidance: "Configure new servers with configure_mcp after approval. The user must enable /permissions external before connect_mcp is available. Each connection and tool call needs approval.",
+        }) };
+      },
+    }];
+    if (context.permissions.write) tools.push({
+      name: "configure_mcp",
+      description: "When the user needs a new integration, propose a NEW MCP server configuration with explicit review. Use preset playwright for Microsoft's pinned browser server, or provide a custom server. Only saves configuration; never installs, starts, overwrites, or grants permissions.",
+      schema: setupSchema,
+      prepare: async (input) => {
+        const args = setupSchema.parse(input);
+        const config = structuredClone(args.preset ? playwrightPreset : args.server!);
+        ensureShareable({ id: args.id, server: config });
+        const lifetime = this.lifetime.signal;
+        return { name: "configure_mcp", mutating: true, details: { id: args.id, server: config, path: ".jev/config.json",
+          warning: "Save only. Download/execution requires separate external permission and connection approval." },
+        execute: async (signal) => {
+          await this.configure(args.id, config, { ...context, signal: AbortSignal.any([signal, lifetime]), write() {},
+            confirm: async () => true });
+          return { configured: args.id, connected: false, next: context.permissions.external ?
+            "Use connect_mcp to request connection approval." : "Ask the user to enable /permissions external before connecting." };
+        } };
+      },
+    });
+    if (extensionsAllowed(context)) tools.push({
+      name: "connect_mcp",
+      description: "Request fresh approval to start/connect a configured MCP server. Stdio may download and execute third-party code without a sandbox. After connection its tools become available; every call still requires exact approval.",
+      schema: z.object({ id: serverId }).strict(),
+      prepare: async (input) => {
+        const { id } = z.object({ id: serverId }).strict().parse(input);
+        const entry = this.servers.get(id);
+        if (!entry) throw new Error(`Unknown MCP server: ${id}`);
+        ensureShareable(entry);
+        const lifetime = this.lifetime.signal;
+        return { name: "connect_mcp", mutating: true, details: { id, ...entry,
+          warning: "UNSANDBOXED: may download/execute third-party code, read files including credentials, and contact the network. Approval covers handshake, discovery and cleanup, never tool calls." },
+        execute: async (signal) => {
+          await this.connect(id, { ...context, signal: AbortSignal.any([signal, lifetime]), write() {}, confirm: async () => true });
+          return { connected: id, tools: this.connections.get(id)?.status().tools };
+        } };
+      },
+    });
+    return tools;
   }
 
   async connect(id: string, io: ExtensionIO): Promise<void> {
@@ -261,6 +364,16 @@ export class ExtensionHost {
 export async function handleExtensionCommand(line: string, host: ExtensionHost, io: ExtensionIO): Promise<boolean> {
   const [command, operation = "list", id, ...rest] = line.trim().split(/\s+/);
   if (!["/plugins", "/mcp", "/hooks"].includes(command!)) return false;
+  if (command === "/mcp" && operation === "add") {
+    if (!id) throw new Error("Usage: /mcp add playwright | /mcp add ID JSON_SERVER_CONFIG");
+    const rawConfig = line.trim().match(/^\/mcp\s+add\s+\S+\s+([\s\S]+)$/)?.[1];
+    const config = rawConfig ? mcpServerSchema.parse(JSON.parse(rawConfig)) :
+      id === "playwright" ? playwrightPreset : undefined;
+    if (!config) throw new Error("Unknown preset; supply a JSON MCP server configuration");
+    await host.configure(id, config, io);
+    io.write(`Saved MCP server ${id}. Nothing downloaded or started. Enable /permissions external, then /mcp connect ${id}.\n`);
+    return true;
+  }
   if (rest.length || (!id && !["list", "status"].includes(operation)) || (id && ["list", "status"].includes(operation))) {
     throw new Error(`Invalid ${command} arguments`);
   }

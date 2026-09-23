@@ -11,7 +11,7 @@ const exec = promisify(execFile);
 const cli = path.resolve("src/cli.ts");
 const skip = process.platform !== "darwin" || !existsSync("/usr/bin/python3");
 
-test("bare jevcode starts chat, retains follow-ups, saves only after approval, and resumes", { skip }, async (t) => {
+test("plain chat retains follow-ups, saves only after approval, and resumes", { skip }, async (t) => {
   const project = await fixture(t);
   let requests = 0;
   const url = await server(t, (request, response) => {
@@ -35,14 +35,14 @@ test("bare jevcode starts chat, retains follow-ups, saves only after approval, a
     ]),
   };
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--plain",
   ], { env, timeout: 20_000 });
   assert.match(result.stdout, /Remembered cobalt/);
   assert.equal(requests, 2);
   const saved = (await readdir(path.join(project.workspace.root, ".jev/sessions")))[0]!;
   assert.match(await readFile(path.join(project.workspace.root, ".jev/sessions", saved), "utf8"), /Remember cobalt/);
   const resumed = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--plain",
     "--resume", saved.replace(".json", ""),
   ], { env: { ...env, JEV_PTY_PROMPTS: JSON.stringify([["jevcode> ", "What did I say?\n"], ["jevcode> ", "/exit\n"]]) }, timeout: 20_000 });
   assert.match(resumed.stdout, /Remembered cobalt/);
@@ -65,7 +65,7 @@ test("chat cancellation returns to the prompt and read-only permissions remain u
   project.config.llm.baseUrl = url;
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--read-only", "--plain",
   ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
     JEV_PTY_PROMPTS: JSON.stringify([["jevcode> ", "Wait\n"], ["thinking: main", "\u0003"], ["jevcode> ", "Continue\n"], ["jevcode> ", "/exit\n"]]),
   }, timeout: 20_000 });
@@ -95,7 +95,7 @@ test("queued input cannot preapprove a mutation and denied chat actions do not w
   project.config.llm.baseUrl = url;
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--write",
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--confirm-edits", "--plain",
   ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
     JEV_PTY_PROMPTS: JSON.stringify([["jevcode> ", "Create no.txt\n"], ["thinking: main", "yes\n"],
       ["Type yes to execute this exact action:", "no\n"], ["jevcode> ", "/exit\n"]]),
@@ -106,7 +106,7 @@ test("queued input cannot preapprove a mutation and denied chat actions do not w
   await assert.rejects(project.workspace.read("no.txt"), /ENOENT/);
 });
 
-test("chat executes exactly approved writes and returns to the conversation", { skip }, async (t) => {
+test("chat applies workspace edits by default and returns to the conversation without an approval prompt", { skip }, async (t) => {
   const project = await fixture(t);
   let requests = 0;
   const url = await server(t, (request, response) => {
@@ -125,12 +125,12 @@ test("chat executes exactly approved writes and returns to the conversation", { 
   project.config.llm.baseUrl = url;
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--write",
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--plain",
   ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
-    JEV_PTY_PROMPTS: JSON.stringify([["jevcode> ", "Create approved.txt\n"],
-      ["Type yes to execute this exact action:", "yes\n"], ["jevcode> ", "/exit\n"]]),
+    JEV_PTY_PROMPTS: JSON.stringify([["jevcode> ", "Create approved.txt\n"], ["jevcode> ", "/exit\n"]]),
   }, timeout: 20_000 });
   assert.match(result.stdout, /Write completed/);
+  assert.doesNotMatch(result.stdout, /Type yes to execute/);
   assert.equal(await project.workspace.read("approved.txt"), "approved");
 });
 
@@ -165,7 +165,7 @@ test("interactive capability authoring, skill slash invocation, and planning wor
   project.config.llm.baseUrl = url;
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--read-only", "--plain",
   ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
     JEV_PTY_PROMPTS: JSON.stringify([
       ["jevcode> ", "/permissions edit\n"], ["Type yes:", "yes\n"],
@@ -203,7 +203,7 @@ test("queued slash commands and queued yes cannot elevate permissions", { skip }
   project.config.llm.baseUrl = url;
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--read-only", "--plain",
   ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
     JEV_PTY_PROMPTS: JSON.stringify([
       ["jevcode> ", "Inspect\n"], ["thinking: main", "/permissions all\nyes\n"],
@@ -214,7 +214,7 @@ test("queued slash commands and queued yes cannot elevate permissions", { skip }
   assert.match(result.stdout, /Permissions unchanged/);
 });
 
-test("full-screen multiline editor submits with Ctrl-S, sanitizes model escapes, and restores the terminal", { skip }, async (t) => {
+test("default TUI sends with Enter, supports Ctrl-J multiline input, sanitizes output and restores the terminal", { skip }, async (t) => {
   const project = await fixture(t);
   let requests = 0;
   const url = await server(t, (request, response) => {
@@ -231,13 +231,15 @@ test("full-screen multiline editor submits with Ctrl-S, sanitizes model escapes,
   project.config.llm.baseUrl = url;
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--fullscreen",
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
   ], { env: { ...process.env, TERM: "xterm-256color", OPENAI_API_KEY: "fake", HOME: project.workspace.root,
     JEV_PTY_RESIZE: "[30,100]",
-    JEV_PTY_PROMPTS: JSON.stringify([["jevcode>", "Line one\rLine two\u0013"], ["SCREEN_RESPONSE", "\u0003"]]),
+    JEV_PTY_PROMPTS: JSON.stringify([["jevcode>", "Line one\nLine two\r"], ["SCREEN_RESPONSE", "\u0003"]]),
   }, timeout: 20_000 });
   assert.equal(requests, 1);
   assert.match(result.stdout, /\u001b\[\?1049h/);
+  assert.match(result.stdout, /JEV CODE/);
+  assert.match(result.stdout, /auto edits/);
   assert.match(result.stdout, /\u001b\[\?1049l/);
   assert.doesNotMatch(result.stdout, /\u001b]52;c;POISON/);
 });
@@ -256,7 +258,7 @@ test("partial pretyped yes and a queued Enter cannot approve a new plain-termina
   project.config.llm.baseUrl = url;
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   const result = await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--write", "--plain",
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--confirm-edits", "--plain",
   ], { env: { ...process.env, OPENAI_API_KEY: "fake", HOME: project.workspace.root,
     JEV_PTY_PROMPTS: JSON.stringify([["jevcode> ", "Write\n"], ["thinking: main", "yes"],
       ["Type yes to execute this exact action:", "\n"], ["jevcode> ", "/exit\n"]]),
@@ -311,9 +313,36 @@ test("full-screen queued yes and a fresh empty submit cannot elevate permissions
   });
   await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
   await exec("/usr/bin/python3", [
-    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--fullscreen",
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root, "--fullscreen", "--read-only",
   ], { env: { ...process.env, TERM: "xterm-256color", OPENAI_API_KEY: "fake", HOME: project.workspace.root,
     JEV_PTY_PROMPTS: JSON.stringify([["jevcode>", "/permissions all\u0013yes\u0013"], ["yes:", "\u0013"], ["QUEUE_SAFE", "\u0003"]]),
   }, timeout: 20_000 });
   assert.equal(requests, 1);
+});
+
+test("TUI history recalls user prompts and Enter approves only a freshly typed answer", { skip }, async (t) => {
+  const project = await fixture(t);
+  let requests = 0;
+  project.config.llm.baseUrl = await server(t, (request, response) => {
+    void requestBody(request).then((body) => {
+      assert.equal((body.messages as { content: string }[]).at(-1)!.content, "Recall this prompt");
+      requests++;
+      response.end(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: `HISTORY_REPLY_${requests}` }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 2, completion_tokens: 2 },
+      }));
+    });
+  });
+  await writeFile(path.join(project.workspace.root, ".jev/config.json"), JSON.stringify(project.config));
+  const result = await exec("/usr/bin/python3", [
+    path.resolve("test/pty-approval.py"), process.execPath, "--import", "tsx", cli, "--cwd", project.workspace.root,
+  ], { env: { ...process.env, TERM: "xterm-256color", OPENAI_API_KEY: "fake", HOME: project.workspace.root,
+    JEV_PTY_PROMPTS: JSON.stringify([
+      ["jevcode>", "/permissions external\r"], ["yes:", "yes\r"],
+      ["enabled;", "Recall this prompt\r"], ["HISTORY_REPLY_1", "\u001b[A\r"],
+      ["HISTORY_REPLY_2", "\u0003"],
+    ]),
+  }, timeout: 20_000 });
+  assert.equal(requests, 2);
+  assert.match(result.stdout, /enabled;/);
 });

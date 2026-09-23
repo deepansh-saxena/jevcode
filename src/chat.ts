@@ -14,6 +14,7 @@ export interface ChatOptions {
   images?: string[];
   autoCompact?: boolean;
   services?: ChatServices;
+  editApproval?: "auto" | "confirm";
 }
 
 export async function chat(project: Project, settings: Pick<RunOptions, "permissions" | "skills" | "specialistId">,
@@ -22,7 +23,8 @@ export async function chat(project: Project, settings: Pick<RunOptions, "permiss
   const model = await createCodingModel(project.config.llm, process.env, AbortSignal.timeout(project.config.llm.timeoutMs));
   const sessionId = resume ?? (options.continue ? await latestSession(project) : undefined);
   const state: ChatState = { project, model, messages: sessionId ? await restoreSession(project, sessionId, model) : [],
-    settings, planMode, runs: 0, compactions: 0, metrics: newChatMetrics(), autoCompact: options.autoCompact ?? false };
+    settings, planMode, runs: 0, compactions: 0, metrics: newChatMetrics(), autoCompact: options.autoCompact ?? false,
+    editApproval: options.editApproval ?? "auto" };
   const terminal = options.fullscreen ? await fullscreenTerminal(project) : new PlainTerminal(project);
   const app = new ChatController(state, options.services);
   let controller: AbortController | undefined;
@@ -36,22 +38,27 @@ export async function chat(project: Project, settings: Pick<RunOptions, "permiss
   process.on("SIGHUP", abort);
   terminal.write(`Jev Code | ${project.config.llm.provider}/${project.config.llm.model} | Jev ${project.config.jev.mode}\n`);
   terminal.write("Context stays in memory; /save explicitly persists it. /help lists commands. Ctrl-C cancels a turn or exits.\n");
-  terminal.write(options.fullscreen ? "Enter inserts a newline; Ctrl-S submits. Tab completes commands.\n" :
+  terminal.write(options.fullscreen ? "Enter sends; Ctrl-J or Alt-Enter adds a line; Ctrl-S also sends. Up recalls prompts. Tab completes commands.\n" :
     "Tab completes commands. /paste starts multiline input; /end submits it. --fullscreen opens the visual interface.\n");
-  terminal.write("Each mutation needs fresh exact-action approval. Busy input is queued, never treated as approval.\n");
+  terminal.write(`${settings.permissions.write && state.editApproval === "auto" ? "Workspace edits apply automatically" : "Workspace edits are read-only or individually approved"}; commands, skill installs and MCP still require approval. Busy input never approves actions.\n`);
   if (state.planMode) terminal.write("Plan mode: read-only investigation and planning; no edits or commands.\n");
   const startup = (options.images ?? []).map((image) => `/attach ${image}`);
+  const mode = (): string => state.planMode ? "PLAN / read-only" : !state.settings.permissions.write ? "read-only" :
+    state.editApproval === "auto" ? "auto edits" : "confirm edits";
   try {
     while (!closed) {
+      if (options.fullscreen) terminal.status(`${project.config.llm.model} | ${mode()} | ${state.metrics.llm.inputTokens} in / ${state.metrics.llm.outputTokens} out | ready`);
       const line = startup.shift() ?? await terminal.read("jevcode> ");
       if (line === null) break;
       if (!line.trim()) continue;
+      if (options.fullscreen) terminal.write(`\n${line.startsWith("/") ? "Command" : "You"} > ${line}\n\n`);
       controller = new AbortController();
       const signal = controller.signal;
       let liveInput = 0;
       let liveOutput = 0;
+      const tools = new Map<string, number>();
       const activity = (text: string): void => terminal.status(options.fullscreen ?
-        `${project.config.llm.model} | ${state.planMode ? "plan" : "chat"} | ${liveInput} in / ${liveOutput} out | ${text}` : text);
+        `${project.config.llm.model} | ${mode()} | ${liveInput} in / ${liveOutput} out\n${text}` : text);
       try {
         const result = await app.submit(line.trim(), {
           signal, write: (text) => terminal.write(text),
@@ -75,10 +82,20 @@ export async function chat(project: Project, settings: Pick<RunOptions, "permiss
             } else if (event === "shell_output" && typeof data.text === "string") {
               terminal.write(data.text);
             } else if (event === "llm_request") activity(`thinking: ${String(data.role)}`);
+            else if (event === "tool_started") {
+              tools.set(String(data.actionId), performance.now());
+              activity(`using ${String(data.tool)}`);
+              if (options.fullscreen) terminal.write(`\n  > ${String(data.tool)}\n`);
+            } else if (event === "tool_completed") {
+              const elapsed = Math.round(performance.now() - (tools.get(String(data.actionId)) ?? performance.now()));
+              if (options.fullscreen) terminal.write(`  done ${String(data.tool)} (${elapsed} ms)\n`);
+            } else if (event === "edit_authorized") {
+              terminal.write(`  Editing ${String(data.path)} (auto; /checkpoints for undo)\n`);
+            } else if (event === "approval_requested") activity(`approval needed: ${String(data.tool)}`);
             else if (event === "turn_finished") {
               activity(String(data.status));
               terminal.write(`${state.metrics.llm.inputTokens} input / ${state.metrics.llm.outputTokens} output tokens; log: ${String(data.eventLog)}\n`);
-            } else if (["routing", "tool_started", "tool_error", "routing_fallback", "context_pruned",
+            } else if (["routing", "tool_error", "routing_fallback", "context_pruned",
               "auto_compaction_started", "auto_compaction_completed", "task_started"].includes(event)) {
               activity(`${event}: ${JSON.stringify(event === "routing" ? data.effective ?? data : data)}`);
             }

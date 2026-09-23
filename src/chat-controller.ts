@@ -59,6 +59,7 @@ export class ChatController {
           ...this.services.runOptions, ...this.state.settings,
           budget,
           task: command.task, images, model: this.state.model, conversation: this.state.messages,
+          editApproval: this.state.editApproval ?? "confirm",
           planMode: this.state.planMode, signal: io.signal, emit: log.emit,
           ...(command.skills ? { skills: command.skills } : {}),
           ...(command.skillArguments ? { skillArguments: command.skillArguments } : {}),

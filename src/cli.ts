@@ -17,8 +17,9 @@ const help = `Jev Code - local coding harness
 
 Usage:
   jevcode [--cwd DIR] [--provider copilot|openai|api] [--model ID]
-          [--write] [--commands] [--execution] [--plan] [--skill ID ...] [--specialist ID] [--resume UUID|--continue]
+          [--read-only|--confirm-edits] [--commands] [--execution] [--plan] [--skill ID ...] [--specialist ID] [--resume UUID|--continue]
           [--plain|--fullscreen] [--image WORKSPACE_FILE ...] [--auto-compact]
+          [--jev-off]
   jevcode chat [same options]
   jevcode serve [--cwd DIR] [--provider copilot|openai|api] [--model ID] [--plan]
   jevcode init [--cwd DIR]
@@ -38,14 +39,16 @@ Usage:
                [--provider copilot|openai|api] [--model ID]
                [--write] [--commands] [--execution] [--plan] [--image WORKSPACE_FILE ...] [--json] "task"
 
-Run is read-only by default. --write, --commands, and --execution expose those tools,
+Interactive chat edits workspace files automatically by default. --read-only disables edits;
+--confirm-edits asks before each edit. Commands, skill installs and MCP still require approval.
+Scripted run is read-only by default. --write, --commands, and --execution expose those tools,
 but EACH mutating action still requires interactive approval.
 --commands exposes configured commands; --execution separately enables arbitrary shell.
 Commands execute project code with your OS permissions, NOT in a sandbox.
 --plan forces read-only investigation and planning even when edit flags are present.
 In chat, /help lists commands; /permissions enables tools and /skills or /agents
 can ask the coding model to create reusable capabilities after approval.
---plain is the deterministic default. --fullscreen opts into a visual TTY editor.
+Interactive chat uses the visual TUI by default. --plain keeps the readline interface.
 --image explicitly consents to sending validated image bytes to the coding provider.
 serve uses versioned newline-delimited JSON over stdin/stdout; never network listeners.
 benchmark-code executes trusted suite code; the verifier is NOT a security sandbox.
@@ -55,7 +58,8 @@ Configuration: .jev/config.json
 Account credentials: ~/.jev-code/auth/ (private files, separate from this project).
 API-key mode: OPENAI_API_KEY; TYPESAFE_API_KEY only when using Jev.
 openai login means ChatGPT/Codex subscription access, not OpenAI Platform billing.
-Jev is disabled by default; enabling it requires allowDataSharing consent.
+Jev-first startup guides new workspaces through key setup and data-sharing consent.
+Choose off during setup or pass --jev-off explicitly; configured guardrails cannot be bypassed.
 `;
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
@@ -66,6 +70,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       specialist: { type: "string" }, write: { type: "boolean" },
       commands: { type: "boolean" }, json: { type: "boolean" },
       execution: { type: "boolean" },
+      "read-only": { type: "boolean" }, "confirm-edits": { type: "boolean" },
+      "jev-off": { type: "boolean" },
       "allow-verifier-code": { type: "boolean" }, preflight: { type: "boolean" },
       plan: { type: "boolean" },
       provider: { type: "string" }, model: { type: "string" },
@@ -78,6 +84,9 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (values.help || (!positionals.length && !process.stdin.isTTY)) { process.stdout.write(help); return; }
   const command = positionals[0] ?? "chat";
   if (values.plain && values.fullscreen) throw new Error("Choose --plain or --fullscreen, not both");
+  if (values["read-only"] && (values.write || values.commands || values.execution)) throw new Error("--read-only cannot be combined with write or command permissions");
+  if (values["confirm-edits"] && command !== "chat") throw new Error("--confirm-edits is only supported by interactive chat");
+  if (values["jev-off"] && !["chat", "run", "serve"].includes(command)) throw new Error("--jev-off is only supported by chat, run, or serve");
   if (values.resume && values.continue) throw new Error("Choose --resume or --continue, not both");
   if ((values.image?.length ?? 0) > MAX_IMAGES) throw new Error(`At most ${MAX_IMAGES} images per task`);
   const root = path.resolve(values.cwd ?? process.cwd());
@@ -164,7 +173,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (command === "init") {
     if (positionals.length !== 1) throw new Error("init does not take a task");
     await initialize(root);
-    process.stdout.write("Created .jev/ with separate skills and specialists. Set the model and credentials before running.\n");
+    process.stdout.write("Created .jev/ with separate skills and specialists. Configure the coding provider; first coding startup will guide Jev setup (default: on) or an explicit off choice.\n");
     return;
   }
   if (command === "skills") {
@@ -210,6 +219,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }, null, 2)}\n`);
     return;
   }
+  const { ensureJevSetup } = await import("./jev-cli.js");
+  await ensureJevSetup(project, values["jev-off"] ?? false, command !== "serve" && Boolean(process.stdin.isTTY && process.stderr.isTTY));
   if (values.provider) {
     const provider = providerName(values.provider);
     if (provider !== project.config.llm.provider && !values.model) {
@@ -224,10 +235,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     const { chat } = await import("./chat.js");
     await chat(project, {
       skills: values.skill ?? [], ...(values.specialist ? { specialistId: values.specialist } : {}),
-      permissions: { write: values.write ?? false, commands: values.commands ?? false, execution: values.execution ?? false },
+      permissions: { write: !values["read-only"], commands: values.commands ?? false, execution: values.execution ?? false },
     }, values.resume, values.plan ?? false, {
-      fullscreen: values.fullscreen ?? false, continue: values.continue ?? false,
+      fullscreen: values.fullscreen ?? (!values.plain && process.env.TERM !== "dumb"), continue: values.continue ?? false,
       images: values.image ?? [], autoCompact: values["auto-compact"] ?? false,
+      editApproval: values["confirm-edits"] ? "confirm" : "auto",
     });
     return;
   }

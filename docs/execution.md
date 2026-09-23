@@ -106,7 +106,8 @@ rather than silently evicting unread results.
 ## Read-only concurrent specialists
 
 `delegate_task` remains sequential by default, with inherited permissions and
-ordinary per-action approvals for a mutating specialist. `background: true`
+the session's ordinary edit policy; commands and other privileged actions still
+require per-action approval. `background: true`
 returns a task ID. `delegate_parallel` accepts a `tasks` array of
 `{specialistId, task}` and waits for reports in input order, or returns IDs with
 `background: true`. Only installed specialists whose entire tool list is drawn

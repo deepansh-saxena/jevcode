@@ -9,7 +9,7 @@ export const executionToolNames = [
 export const toolNames = [
   ...executionToolNames, "list_capabilities", "create_skill", "create_specialist", "load_skill", "delegate_task", "delegate_parallel", "ask_user",
 ] as const;
-export type ToolName = (typeof toolNames)[number] | "load_skill_resource" | `mcp__${string}`;
+export type ToolName = (typeof toolNames)[number] | "load_skill_resource" | "list_mcp_servers" | "configure_mcp" | "connect_mcp" | `mcp__${string}`;
 
 export const commandSchema = z.object({
   description: z.string().min(1).max(1000),
@@ -62,6 +62,7 @@ export const configSchema = z.object({
     timeoutMs: z.number().int().min(100).max(300_000).default(60_000),
   }).strict(),
   jev: z.object({
+    setupComplete: z.boolean().optional(),
     mode: z.enum(["off", "shadow", "on"]).default("off"),
     endpoint: endpoint.default("https://api.typesafe.ai/v1/systemone"),
     model: z.string().min(1).default("jev-latest"),

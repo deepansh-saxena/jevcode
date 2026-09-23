@@ -1,20 +1,27 @@
 # Terminal, images, sessions, and editor integration
 
 Jev Code is a local Node 20 CLI. Provider calls require your configured coding
-provider credentials. Jev routing is separately opt-in; none of these interfaces
-enable it automatically.
+provider credentials. New workspaces guide you through Jev setup before coding,
+defaulting to on only after explicit data-sharing consent and key validation.
+Choose off during onboarding or use `--jev-off` for a single session; existing
+settings are preserved. Noninteractive interfaces require prior setup or an
+explicit off choice, never hidden prompts or unconsented requests.
 
 ## Terminal modes
 
-`jevcode` or `jevcode chat` starts the deterministic line-oriented interface.
-`--plain` explicitly selects it, including under a PTY. Scripts should use
+`jevcode` or `jevcode chat` starts the full-screen TUI. `--plain` selects the
+line-oriented interface, also used when `TERM=dumb`. Scripts should use
 `jevcode run "task"` or the stdio protocol below; interactive chat requires a TTY.
 
-`jevcode --fullscreen` opts into a full-screen transcript, activity/status line,
-command completion menu, and multiline input editor. It uses Blessed for terminal
-rendering, resize handling, and alternate-screen management. Enter inserts a
-newline; **Ctrl-S submits**. Left/right/up/down, Home/End, Backspace/Delete, and
-Ctrl-U edit input. Tab completes a unique slash command or shows matching commands.
+The TUI has a workspace/model header, user/command transcript entries, persistent
+tool activity, and a live edit-mode/token status area. `--fullscreen` also selects
+it explicitly. It uses Blessed for rendering, resize handling, and alternate-screen
+management. **Enter submits**; Ctrl-J or Alt-Enter inserts a newline; Ctrl-S still
+submits. Up/Down recall up to 100 prompts for single-line input; multiline input
+uses them to move between lines. Approval answers never enter prompt history.
+Left/right, Home/End, Backspace/Delete, and Ctrl-U edit input. Esc clears a draft
+or dismisses a pending approval/question. Tab completes slash commands and skill
+marketplace operations or shows matching commands.
 PgUp/PgDn and mouse scrolling move through the bounded transcript. The visual
 transcript retains its last 120,000 characters, not the whole in-memory model
 conversation. The interface is deliberately small, not a claim of pixel-for-pixel
@@ -32,10 +39,29 @@ directional-control injection is escaped. Full-screen action-review prompts over
 
 Input submitted while busy is queued, with a 20-message limit. **Queued input
 never answers a confirmation or clarification.** Each confirmation starts with a
-fresh input buffer; pretyped partial `yes` is discarded. In plain mode type `yes`
-and Enter; in full-screen mode type `yes` and Ctrl-S. Enter alone never approves
+fresh input buffer; pretyped partial `yes` is discarded. Type `yes` and Enter in
+either mode (Ctrl-S also works in full-screen). An empty submit never approves
 anything in the full-screen interface. Model `ask_user` answers do not grant tool
 permissions or approve actions.
+
+## Editing policy
+
+Interactive chat starts with workspace editing enabled, applying ordinary
+`write_file` and `replace_text` actions without individual prompts. The status
+area shows `auto edits`, `confirm edits`, `read-only`, or `PLAN / read-only`.
+Use `jevcode --confirm-edits` or `/permissions confirm-edits` to require approval
+for every edit. `/permissions auto-edits` asks fresh consent to enable automatic
+editing. `--read-only` or `/permissions read-only` removes editing tools; plan
+mode withholds mutating tools regardless of the selected edit policy.
+
+Only ordinary workspace writes/replacements can use automatic editing. Commands,
+undo, creating persistent skills/agents, marketplace installation, MCP setup,
+connections and calls retain exact-action approval. Protected paths and
+expected-hash checks remain enforced, and automatic edits create normal undo
+checkpoints. Existing semantic guardrails and before/after hooks still run.
+Sequential specialists inherit the session edit policy; parallel/background
+specialists remain strictly read-only. The noninteractive `run` command and stdio
+protocol retain their previous conservative defaults.
 
 ## Real image attachments
 

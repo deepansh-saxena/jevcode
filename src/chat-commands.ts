@@ -19,7 +19,7 @@ const commands: Record<string, string> = {
   new: "Alias for /clear",
   skills: "List skills; show/use/run/create | search QUERY | preview OWNER/REPO@SKILL | install OWNER/REPO@SKILL",
   agents: "List specialists; show ID | use ID | use off | run ID TASK | create DESCRIPTION",
-  permissions: "Show permissions, or set read-only | edit | commands | all | execution | external (fresh approval to enable)",
+  permissions: "Show permissions, or set read-only | edit | commands | all | execution | external | auto-edits | confirm-edits",
   tasks: "List attached shell and specialist tasks",
   task: "Read bounded output/results for a task ID",
   stop: "Stop an attached task ID",
@@ -35,7 +35,7 @@ const commands: Record<string, string> = {
   config: "Show this chat's configuration without credential values",
   commands: "List configured executable commands; executions still require approval",
   plugins: "List local plugins, or enable|disable ID (fresh session-only trust)",
-  mcp: "List/status MCP servers, or connect|disconnect ID (external permission and trust required)",
+  mcp: "List/status MCP servers; add playwright | add ID JSON | connect/disconnect ID (fresh trust required)",
   hooks: "List hooks, or enable|disable ID (external permission and trust required)",
   doctor: "Check registries and local credential availability without making model requests",
   reload: "Reload capabilities and AGENTS.md; retain session settings",
@@ -70,6 +70,7 @@ export interface ChatState {
   name?: string;
   autoCompact?: boolean;
   costUnknown?: boolean;
+  editApproval?: "auto" | "confirm";
 }
 
 export function newChatMetrics(): RunResult["metrics"] {
@@ -165,6 +166,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
         provider: project.config.llm.provider, model: project.config.llm.model, jev: project.config.jev.mode,
         messages: state.messages.length, planMode: state.planMode,
         permissions: state.planMode ? { write: false, commands: false, execution: false, external: false } : state.settings.permissions,
+        editApproval: state.editApproval ?? "confirm",
         pinnedSkills: state.settings.skills ?? [], pinnedSpecialist: state.settings.specialistId ?? null,
         limits: project.config.limits,
       });
@@ -220,9 +222,24 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       throw new Error(`Usage: /${name} [show ID | use ${kind === "skills" ? "ID...|none" : "ID|off"} | run ID TASK | create DESCRIPTION${kind === "skills" ? " | search QUERY | preview OWNER/REPO@SKILL | install OWNER/REPO@SKILL" : ""}]`);
     }
     case "permissions": {
-      if (!argument) { print({ configured: state.settings.permissions, planMode: state.planMode, approval: "Every mutation requires exact-action approval." }); return handled; }
-      const mode = z.enum(["read-only", "edit", "commands", "all", "execution", "external"]).safeParse(argument);
-      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all|execution|external");
+      if (!argument) { print({ configured: state.settings.permissions, planMode: state.planMode,
+        editApproval: state.editApproval ?? "confirm", approval: "Commands, persistent capabilities and external actions always require exact-action approval." }); return handled; }
+      const mode = z.enum(["read-only", "edit", "commands", "all", "execution", "external", "auto-edits", "confirm-edits"]).safeParse(argument);
+      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all|execution|external|auto-edits|confirm-edits");
+      if (mode.data === "confirm-edits") {
+        state.editApproval = "confirm";
+        io.write("Every workspace edit now requires confirmation. Other permissions are unchanged.\n");
+        return handled;
+      }
+      if (mode.data === "auto-edits") {
+        if (state.planMode) throw new Error("Automatic editing cannot be enabled in plan mode");
+        if (!await io.confirm("Enable automatic workspace edits? File writes/replacements will apply without individual prompts, with protected paths, hash checks and undo retained. Commands, skill installs and MCP still require approval. Type yes: ", io.signal)) return handled;
+        io.signal.throwIfAborted();
+        state.settings.permissions.write = true;
+        state.editApproval = "auto";
+        io.write("Automatic workspace editing enabled; no commands or integrations preapproved.\n");
+        return handled;
+      }
       if (mode.data === "execution") {
         if (state.planMode) throw new Error("Execution permission cannot be enabled in plan mode");
         if (!await io.confirm("Enable arbitrary executable and shell tools? Host execution is NOT sandboxed and can access files and the network with your OS privileges. Every launch still needs exact-action approval. Type yes: ")) {
