@@ -49,7 +49,7 @@ test("model-authored capabilities persist after review and can be loaded and del
   assert.deepEqual(approvals, ["create_skill", "create_specialist"]);
   assert.equal(result.metrics.turns, 8);
   assert.equal(result.metrics.toolCalls, 6);
-  const reloaded = await loadProject(project.workspace.root);
+  const reloaded = await loadProject(project.workspace.root, { globalRoot: null });
   const created = reloaded.skills.find((item) => item.id === skill.id)!;
   assert.ok(created);
   assert.equal(created.mandatory, false);
@@ -76,7 +76,7 @@ test("creation is unavailable in read-only and plan modes, and denial never pers
     }));
     assert.equal(result.status, "blocked");
     assert.equal(approvals, mode === "denied" ? 1 : 0);
-    assert.equal((await loadProject(project.workspace.root)).skills.length, 2);
+    assert.equal((await loadProject(project.workspace.root, { globalRoot: null })).skills.length, 2);
   }
 });
 
@@ -95,7 +95,7 @@ test("capability validation rejects escalation, unknown references, invalid text
   ]) await assert.rejects(createSpecialist.prepare(args));
   project.config.limits.maxSkillChars = 100;
   await assert.rejects(createSkill.prepare(skill), /budget/);
-  assert.equal((await loadProject(project.workspace.root)).skills.length, 2);
+  assert.equal((await loadProject(project.workspace.root, { globalRoot: null })).skills.length, 2);
 });
 
 test("creation revalidates after approval and refuses collisions and symbolic-link directories", async (t) => {

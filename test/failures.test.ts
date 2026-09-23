@@ -48,7 +48,7 @@ test("mandatory project guidance is loaded and remains independent of Jev", asyn
   const project = await fixture(t);
   const { loadProject } = await import("../src/registry.js");
   await writeFile(path.join(project.workspace.root, "AGENTS.md"), "Use the local naming convention.");
-  const reloaded = await loadProject(project.workspace.root);
+  const reloaded = await loadProject(project.workspace.root, { globalRoot: null });
   const model = scripted([final()], (messages) => assert.match(messages[0]!.content!, /local naming convention/));
   assert.equal((await run(reloaded, options(model))).status, "completed");
 });

@@ -125,14 +125,15 @@ export async function routeTask(
   }
   const questions: Record<string, Question> = {};
   const optionalSkills = project.config.jev.routeSkills === false ? [] :
-    project.skills.filter((skill) => !base.skillIds.includes(skill.id));
+    project.skills.filter((skill) => skill.modelInvocable !== false && !base.skillIds.includes(skill.id));
   for (const [index, skill] of optionalSkills.entries()) {
     questions[`skill_${index}`] = {
       type: "noul",
       instructions: `Would these instructions materially help with the task? Skill ${skill.id}: ${skill.description}${skill.applicability ? ` Applicability: ${skill.applicability}` : ""}`,
     };
   }
-  const eligible = project.specialists.filter((specialist) => specialist.tools.some((tool) =>
+  const eligible = project.specialists.filter((specialist) => specialist.skills.every((id) =>
+    project.skills.find((skill) => skill.id === id)?.modelInvocable !== false) && specialist.tools.some((tool) =>
     ["list_files", "read_file", "search_files"].includes(tool) ||
     (tool === "run_command" ? context.permissions?.commands : context.permissions?.write)));
   if (project.config.jev.routeSpecialists !== false && project.config.limits.maxSpecialistRuns > 0 &&

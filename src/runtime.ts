@@ -13,8 +13,10 @@ import { pruneContext, serializeToolResult } from "./context.js";
 import { readJevKey } from "./jev-key.js";
 import { capabilityTools } from "./capabilities.js";
 import { idSchema } from "./config.js";
+import { extensionsAllowed, type ExtensionHost } from "./extensions.js";
+import { skillResource } from "./skill-catalog.js";
 
-export const RUNTIME_POLICY_VERSION = "3";
+export const RUNTIME_POLICY_VERSION = "4";
 
 export const specialistReportSchema = z.object({
   summary: z.string().min(1).max(8_000),
@@ -38,6 +40,9 @@ export interface RunOptions {
   onText?: (text: string) => void;
   planMode?: boolean;
   dynamicCapabilities?: boolean;
+  extensions?: ExtensionHost;
+  background?: boolean;
+  skillArguments?: Record<string, string>;
 }
 export interface RunResult {
   status: "completed" | "failed" | "blocked" | "cancelled" | "limited";
@@ -103,6 +108,10 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
   };
   try {
     if (!options.task.trim()) throw new Error("Task must not be empty");
+    if (options.extensions && !extensionsAllowed({ permissions, planMode: options.planMode, background: options.background })) {
+      await options.extensions.cancel();
+    }
+    await loadSkills(project, options.skills ?? [], { arguments: options.skillArguments });
     for (const id of route.skillIds) {
       if (!project.skills.some((skill) => skill.id === id)) throw new Error(`Unknown skill: ${id}`);
     }
@@ -134,17 +143,23 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
       }
       const role = specialist?.id ?? "main";
       const selectedSkills = new Set([...route.skillIds, ...(specialist?.skills ?? [])]);
-      let skills = await loadSkills(project, [...selectedSkills]);
+      const invocation = { source: "model" as const, explicitIds: options.skills ?? [], arguments: options.skillArguments };
+      let skills = await loadSkills(project, [...selectedSkills], invocation);
       let prompt = systemPrompt(project, skills.text, specialist, options.planMode);
       const tools: Tool[] = specialist ? available.filter((tool) => specialist.tools.some((name) => name === tool.name)) :
         [...available, ...(options.dynamicCapabilities === false ? [] : capabilityTools(project, permissions.write))];
+      const extensionContext = { permissions, planMode: options.planMode, background: options.background, specialist: Boolean(specialist) };
+      tools.push(...(options.extensions?.tools(extensionContext) ?? []));
       if (!specialist && options.dynamicCapabilities !== false) {
         if (project.config.jev.routeSkills !== false) tools.push({
           name: "load_skill", description: "Load an installed skill into this task's instructions, without granting permissions. Use list_capabilities to find IDs.",
           schema: z.object({ skillId: idSchema }).strict(),
           async prepare(input) {
             const args = z.object({ skillId: idSchema }).strict().parse(input);
-            const loaded = await loadSkills(project, [...selectedSkills, args.skillId]);
+            if (project.skills.find((skill) => skill.id === args.skillId)?.modelInvocable === false) {
+              throw new BlockedError("This skill requires explicit user invocation");
+            }
+            const loaded = await loadSkills(project, [...selectedSkills, args.skillId], invocation);
             return { name: "load_skill", mutating: false, details: args, async execute() {
               selectedSkills.add(args.skillId);
               skills = loaded;
@@ -155,6 +170,17 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
             } };
           },
         });
+        tools.push({
+          name: "load_skill_resource", description: "Read a declared supporting resource of an already loaded skill. Never executes scripts.",
+          schema: z.object({ skillId: idSchema, resource: z.string().min(1).max(1024) }).strict(),
+          async prepare(input) {
+            const args = z.object({ skillId: idSchema, resource: z.string().min(1).max(1024) }).strict().parse(input);
+            const skill = project.skills.find((item) => item.id === args.skillId);
+            if (!skill || !skills.ids.includes(args.skillId)) throw new BlockedError("Load the skill before reading its resources");
+            return { name: "load_skill_resource", mutating: false, details: args, execute: async () =>
+              ({ resource: args.resource, content: await skillResource(skill, project.workspace.root, args.resource) }) };
+          },
+        });
         if (project.config.jev.routeSpecialists !== false && project.config.limits.maxSpecialistRuns > 0) tools.push({
           name: "delegate_task",
           description: "Run an installed specialist on a bounded side task and return its report. Separate context, shared budgets, inherited permissions, sequential execution, no nested delegation. Prefer direct execution for simple tasks.",
@@ -163,6 +189,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
             const args = z.object({ specialistId: idSchema, task: z.string().min(1).max(12_000) }).strict().parse(input);
             const target = project.specialists.find((candidate) => candidate.id === args.specialistId);
             if (!target) throw new Error(`Unknown specialist: ${args.specialistId}`);
+            await loadSkills(project, target.skills, { source: "model" });
             return { name: "delegate_task", mutating: false, details: args, async execute() {
               emit("specialist_delegated", { specialistId: target.id });
               return { specialistId: target.id, ...await agent(target, undefined, args.task) };
@@ -270,7 +297,9 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
               if (!approved) throw new BlockedError("Action was not approved");
             }
             check();
+            if (extensionsAllowed(extensionContext)) await options.extensions?.beforeTool(prepared, signal);
             result = await prepared.execute(signal);
+            if (extensionsAllowed(extensionContext)) await options.extensions?.afterTool(prepared, result, signal);
             check();
             emit("tool_completed", { actionId, tool: tool.name });
           } catch (error) {
@@ -309,6 +338,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
     emit("run_completed", { status, reason: text, metrics });
     return { status, text, route, metrics };
   } finally {
+    if (signal.aborted) await options.extensions?.cancel();
     if (mainMessages) {
       const pending = new Map<string, string>();
       for (const message of mainMessages) {

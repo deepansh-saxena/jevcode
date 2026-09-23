@@ -38,7 +38,7 @@ test("skill slash invocation is task-scoped while explicit pinning persists", as
   const current = state(project);
   const terminal = io();
   assert.deepEqual(await handleChatCommand("/testing Cover the bug", current, terminal),
-    { kind: "task", task: "Cover the bug", skills: ["testing"] });
+    { kind: "task", task: "Cover the bug", skills: ["testing"], skillArguments: { testing: "Cover the bug" } });
   assert.deepEqual(current.settings.skills, []);
   await handleChatCommand("/skills use testing", current, terminal);
   assert.deepEqual(current.settings.skills, ["testing"]);
@@ -114,7 +114,7 @@ test("model switching is session-only, clears context only after consent, and re
   assert.equal(project.config.llm.model, "another");
   assert.deepEqual(current.messages, []);
   const { loadProject } = await import("../src/registry.js");
-  assert.equal((await loadProject(project.workspace.root)).config.llm.model, "gpt-4.1-mini");
+  assert.equal((await loadProject(project.workspace.root, { globalRoot: null })).config.llm.model, "gpt-4.1-mini");
 });
 
 test("sessions list IDs without transcripts; replacing unsaved context requires consent", async (t) => {

@@ -8,6 +8,7 @@ import { BlockedError, isMissing } from "./errors.js";
 import { loadProject, loadSkills, type Project } from "./registry.js";
 import { digest, readText, resolvePath } from "./workspace.js";
 import type { Tool } from "./tools.js";
+import { skillContent, withPrecedence } from "./skill-catalog.js";
 
 const createSkillSchema = z.object({
   id: idSchema,
@@ -27,22 +28,24 @@ const createSpecialistSchema = z.object({
   maxToolCalls: z.number().int().min(1).max(40).default(10),
 }).strict();
 
-export function capabilityCatalog(project: Project) {
+export function capabilityCatalog(project: Project, source: "user" | "model" = "user") {
   return {
-    skills: project.skills.map(({ id, description, applicability, mandatory }) => ({ id, description, applicability, mandatory })),
+    skills: project.skills.filter((skill) => source === "user" || skill.modelInvocable !== false)
+      .map(({ id, description, applicability, mandatory, modelInvocable, userInvocable, argumentHint, provenance }) =>
+        ({ id, description, applicability, mandatory, modelInvocable, userInvocable, argumentHint, provenance })),
     specialists: project.specialists,
   };
 }
 
 export async function reloadCapabilities(project: Project): Promise<void> {
-  const loaded = await loadProject(project.workspace.root);
+  const loaded = await loadProject(project.workspace.root, project.catalogOptions);
   for (const skill of loaded.skills) {
     for (const id of skill.commandIds ?? []) {
       if (!Object.hasOwn(project.config.commands, id)) throw new Error(`Skill ${skill.id}: command ${id} is not configured in this session`);
     }
   }
-  project.skills = loaded.skills;
-  project.specialists = loaded.specialists;
+  project.skills = withPrecedence(loaded.skills, project.skills.filter((item) => item.provenance?.scope === "plugin"));
+  project.specialists = withPrecedence(loaded.specialists, project.specialists.filter((item) => item.provenance?.scope === "plugin"));
   project.instructions = loaded.instructions;
 }
 
@@ -54,11 +57,12 @@ export async function describeCapability(project: Project, kind: "skills" | "spe
   }
   const skill = project.skills.find((item) => item.id === id);
   if (!skill) throw new Error(`Unknown skill: ${id}`);
-  return { ...skill, content: await readText(await resolvePath(project.workspace.root, skill.instructions), 100_000) };
+  return { ...skill, content: await skillContent(skill, project.workspace.root) };
 }
 
 async function newManifest(project: Project, kind: "skills" | "specialists", id: string): Promise<string> {
   await project.workspace.path(".");
+  if (project[kind].some((item) => item.id === id)) throw new Error(`A ${kind} capability with ID ${id} already exists`);
   const relative = `.jev/${kind}/${id}.json`;
   if (project.workspace.protectedPaths.some((prefix) =>
     relative.toLowerCase() === prefix.toLowerCase() || relative.toLowerCase().startsWith(`${prefix.toLowerCase()}/`))) {
@@ -102,7 +106,7 @@ export function capabilityTools(project: Project, writable: boolean): Tool[] {
     schema: z.object({}).strict(),
     async prepare(input) {
       z.object({}).strict().parse(input);
-      return { name: "list_capabilities", mutating: false, details: {}, execute: async () => capabilityCatalog(project) };
+      return { name: "list_capabilities", mutating: false, details: {}, execute: async () => capabilityCatalog(project, "model") };
     },
   }];
   if (!writable) return tools;
@@ -153,7 +157,7 @@ export function capabilityTools(project: Project, writable: boolean): Tool[] {
     async prepare(input) {
       const args = createSpecialistSchema.parse(input);
       const validate = async (): Promise<string> => {
-        await loadSkills(project, args.skills);
+        await loadSkills(project, args.skills, { source: "model" });
         return newManifest(project, "specialists", args.id);
       };
       const manifestPath = await validate();
