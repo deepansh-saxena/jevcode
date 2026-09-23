@@ -19,11 +19,13 @@ export interface Tool {
   name: ToolName;
   description: string;
   schema: z.ZodType;
+  inputSchema?: Record<string, unknown>;
   prepare: (input: unknown) => Promise<PreparedAction>;
 }
 export interface Permissions {
   write: boolean;
   commands: boolean;
+  external?: boolean;
 }
 const filepath = z.string().min(1).max(1024);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -273,7 +275,7 @@ export function toolSpecs(tools: Tool[]): ToolSpec[] {
     type: "function",
     function: {
       name: tool.name, description: tool.description,
-      parameters: z.toJSONSchema(tool.schema, { target: "draft-7" }),
+      parameters: tool.inputSchema ?? z.toJSONSchema(tool.schema, { target: "draft-7" }),
     },
   }));
 }

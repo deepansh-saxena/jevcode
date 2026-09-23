@@ -7,13 +7,14 @@ import { errorMessage } from "./errors.js";
 import { terminalSafe } from "./terminal.js";
 import { restoreSession } from "./session.js";
 import { commandCompletions, handleChatCommand, newChatMetrics, recordRun, type ChatState } from "./chat-commands.js";
+import { ExtensionHost } from "./extensions.js";
 
 export async function chat(project: Project, settings: Pick<RunOptions, "permissions" | "skills" | "specialistId">,
   resume?: string, planMode = false): Promise<void> {
   if (!process.stdin.isTTY || !process.stderr.isTTY) throw new Error("Chat requires an interactive terminal; use jevcode run for scripts");
   const model = await createCodingModel(project.config.llm, process.env, AbortSignal.timeout(project.config.llm.timeoutMs));
   const state: ChatState = { project, model, messages: resume ? await restoreSession(project, resume, model) : [],
-    settings, planMode, runs: 0, compactions: 0, metrics: newChatMetrics() };
+    settings, planMode, runs: 0, compactions: 0, metrics: newChatMetrics(), extensions: new ExtensionHost(project) };
   const readline = createInterface({ input: process.stdin, output: process.stderr, terminal: true,
     completer: (line: string) => commandCompletions(project, line) });
   let controller: AbortController | undefined;
@@ -90,6 +91,8 @@ export async function chat(project: Project, settings: Pick<RunOptions, "permiss
           const result = await run(project, {
             ...state.settings, task: command.task, model: state.model, conversation: state.messages,
             planMode: state.planMode, signal: controller.signal, emit: log.emit,
+            ...(state.extensions ? { extensions: state.extensions } : {}),
+            ...(command.skillArguments ? { skillArguments: command.skillArguments } : {}),
             ...(command.skills ? { skills: command.skills } : {}),
             ...(command.specialistId ? { specialistId: command.specialistId } : {}),
             ...(command.readOnly ? { permissions: { write: false, commands: false } } : {}),
@@ -113,5 +116,5 @@ export async function chat(project: Project, settings: Pick<RunOptions, "permiss
         process.stderr.write(terminalSafe(`Error: ${errorMessage(error)}\n`));
       } finally { controller = undefined; }
     }
-  } finally { readline.close(); }
+  } finally { readline.close(); await state.extensions?.close(); }
 }

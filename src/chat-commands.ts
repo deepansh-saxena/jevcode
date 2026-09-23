@@ -7,6 +7,7 @@ import { createTools, toolSpecs } from "./tools.js";
 import { capabilityCatalog, capabilityTools, describeCapability, reloadCapabilities } from "./capabilities.js";
 import { listSessions, restoreSession, saveSession } from "./session.js";
 import { compactConversation, contextSize } from "./context.js";
+import { handleExtensionCommand, type ExtensionHost } from "./extensions.js";
 
 const commands: Record<string, string> = {
   help: "Show commands; Tab completes commands and installed skill names",
@@ -15,7 +16,7 @@ const commands: Record<string, string> = {
   new: "Alias for /clear",
   skills: "List skills; show ID | use ID... | use none | run ID [task] | create DESCRIPTION",
   agents: "List specialists; show ID | use ID | use off | run ID TASK | create DESCRIPTION",
-  permissions: "Show permissions, or set read-only | edit | commands | all (approval required to enable)",
+  permissions: "Show permissions, or set read-only | edit | commands | all | external (fresh approval to enable)",
   plan: "Toggle planning, or set on | off; planning disables all writes and commands",
   model: "Show model, or set ID for this chat (changing model clears context after confirmation)",
   models: "List bundled account-model IDs, not live account availability",
@@ -25,6 +26,9 @@ const commands: Record<string, string> = {
   cost: "Alias for /usage; dollar costs are unknown",
   config: "Show this chat's configuration without credential values",
   commands: "List configured executable commands; executions still require approval",
+  plugins: "List local plugins, or enable|disable ID (fresh session-only trust)",
+  mcp: "List/status MCP servers, or connect|disconnect ID (external permission and trust required)",
+  hooks: "List hooks, or enable|disable ID (external permission and trust required)",
   doctor: "Check registries and local credential availability without making model requests",
   reload: "Reload capabilities and AGENTS.md; retain session settings",
   review: "Run a read-only review; optional scope text",
@@ -45,6 +49,7 @@ export interface ChatState {
   runs: number;
   compactions: number;
   metrics: RunResult["metrics"];
+  extensions?: ExtensionHost;
 }
 
 export function newChatMetrics(): RunResult["metrics"] {
@@ -65,10 +70,11 @@ export function recordRun(state: ChatState, result: RunResult): void {
 
 export function commandCompletions(project: Project, line: string): [string[], string] {
   if (!line.startsWith("/")) return [[], line];
-  let candidates = [...Object.keys(commands), ...project.skills.map((skill) => skill.id)].map((name) => `/${name}`);
+  let candidates = [...Object.keys(commands), ...project.skills.filter((skill) => skill.userInvocable !== false).map((skill) => skill.id)].map((name) => `/${name}`);
   const match = /^(\/(?:skills (?:show|use|run)|agents (?:show|use|run)) )(\S*)$/.exec(line);
   if (match) {
-    const items = match[1]!.startsWith("/skills") ? project.skills : project.specialists;
+    const items = match[1]!.startsWith("/skills") ? project.skills.filter((skill) =>
+      match[1]!.includes("show") || skill.userInvocable !== false) : project.specialists;
     candidates = items.map((item) => `${match[1]}${item.id}`);
   }
   return [[...new Set(candidates)].filter((candidate) => candidate.startsWith(line)).sort(), line];
@@ -83,9 +89,11 @@ export interface CommandIO {
 export type ChatCommandResult =
   | { kind: "handled" }
   | { kind: "exit" }
-  | { kind: "task"; task: string; skills?: string[]; specialistId?: string; readOnly?: boolean };
+  | { kind: "task"; task: string; skills?: string[]; specialistId?: string; readOnly?: boolean; skillArguments?: Record<string, string> };
 
 export async function handleChatCommand(line: string, state: ChatState, io: CommandIO): Promise<ChatCommandResult> {
+  if (state.extensions && await handleExtensionCommand(line, state.extensions, { ...io,
+    permissions: state.settings.permissions, planMode: state.planMode })) return { kind: "handled" };
   if (!line.startsWith("/")) return { kind: "task", task: line };
   const space = line.search(/\s/);
   const name = line.slice(1, space < 0 ? undefined : space);
@@ -97,8 +105,8 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
   const noArguments = (): void => { if (argument) throw new Error(`/${name} does not take arguments`); };
   const skillTask = async (id: string, task: string): Promise<ChatCommandResult> => {
     const skills = [...new Set([...(state.settings.skills ?? []), id])];
-    await loadSkills(project, skills);
-    return { kind: "task", task: task || `Follow the ${id} skill for this project.`, skills };
+    await loadSkills(project, skills, { arguments: { [id]: task } });
+    return { kind: "task", task: task || `Follow the ${id} skill for this project.`, skills, skillArguments: { [id]: task } };
   };
   if (!Object.hasOwn(commands, name)) {
     if (project.skills.some((skill) => skill.id === name)) return skillTask(name, argument);
@@ -111,7 +119,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     case "help":
       noArguments();
       io.write(`${Object.entries(commands).map(([id, description]) => `/${id.padEnd(12)} ${description}`).join("\n")}\n`);
-      io.write(`Installed skill commands: ${project.skills.map(({ id }) =>
+      io.write(`Installed skill commands: ${project.skills.filter((skill) => skill.userInvocable !== false).map(({ id }) =>
         Object.hasOwn(commands, id) ? `/skills run ${id}` : `/${id}`).join(", ") || "(none)"}\n`);
       return handled;
     case "clear": case "new":
@@ -175,8 +183,16 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
     }
     case "permissions": {
       if (!argument) { print({ configured: state.settings.permissions, planMode: state.planMode, approval: "Every mutation requires exact-action approval." }); return handled; }
-      const mode = z.enum(["read-only", "edit", "commands", "all"]).safeParse(argument);
-      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all");
+      const mode = z.enum(["read-only", "edit", "commands", "all", "external"]).safeParse(argument);
+      if (!mode.success) throw new Error("Usage: /permissions read-only|edit|commands|all|external");
+      if (mode.data === "external") {
+        if (state.planMode) throw new Error("External permission cannot be enabled in plan mode");
+        if (!await io.confirm("Enable external extension controls? Unsandboxed MCP and hooks each require separate trust; every MCP call requires approval. Type yes: ")) return handled;
+        io.signal.throwIfAborted();
+        state.settings.permissions = { ...state.settings.permissions, external: true };
+        io.write("External permission enabled; servers and hooks remain untrusted until explicitly enabled.\n");
+        return handled;
+      }
       const permissions = { write: ["edit", "all"].includes(mode.data), commands: ["commands", "all"].includes(mode.data) };
       if ((permissions.write && !state.settings.permissions.write) || (permissions.commands && !state.settings.permissions.commands)) {
         if (!await io.confirm(`Enable ${mode.data} tools for this chat? Commands are NOT sandboxed; each mutation still needs approval. Type yes: `)) {
@@ -185,6 +201,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       }
       io.signal.throwIfAborted();
       state.settings.permissions = permissions;
+      await state.extensions?.cancel();
       io.write(`Permissions: ${mode.data}.${state.planMode ? " Plan mode still forces read-only tools." : ""} No action is preapproved.\n`);
       return handled;
     }
@@ -198,6 +215,7 @@ export async function handleChatCommand(line: string, state: ChatState, io: Comm
       }
       io.signal.throwIfAborted();
       state.planMode = enabled;
+      if (enabled) await state.extensions?.cancel();
       io.write(`Plan mode ${enabled ? "on: inspect and propose, no writes or commands" : "off: normal task execution within current permissions"}.\n`);
       return handled;
     }

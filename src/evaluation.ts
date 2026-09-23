@@ -10,6 +10,7 @@ import { run, RUNTIME_POLICY_VERSION, type RunResult } from "./runtime.js";
 import { JevClient, scopeQuestion } from "./jev.js";
 import { readJevKey } from "./jev-key.js";
 import { errorMessage } from "./errors.js";
+import { skillContent, skillResource } from "./skill-catalog.js";
 
 const taskSchema = z.object({
   id: z.string().regex(/^[a-z0-9-]+$/),
@@ -55,11 +56,21 @@ export async function benchmark(project: Project, input: unknown, signal: AbortS
   if (!key) throw new Error(`Missing ${project.config.jev.apiKeyEnv}; run jevcode jev setup before benchmarking`);
   if (new Set(suite.tasks.map((task) => task.id)).size !== suite.tasks.length) throw new Error("Duplicate benchmark task IDs");
   const resources: Record<string, string> = {};
+  const skills = [];
   for (const skill of project.skills) {
-    for (const relative of [skill.instructions, ...(skill.resources ?? [])]) {
-      resources[relative] = await readText(await resolvePath(project.workspace.root, relative), 100_000);
+    const { provenance: _provenance, ...definition } = skill;
+    const instructions = `.jev/skills/${skill.id}.md`;
+    resources[instructions] = await skillContent(skill, project.workspace.root);
+    const references: string[] = [];
+    for (const [index, relative] of (skill.resources ?? []).entries()) {
+      const target = `.jev/skills/${skill.id}-resource-${index}.txt`;
+      resources[target] = await skillResource(skill, project.workspace.root, relative);
+      references.push(target);
     }
+    skills.push({ ...definition, instructions, resources: references,
+      ...(skill.provenance && skill.provenance.format !== "json" ? { argumentHint: skill.argumentHint ?? "" } : {}) });
   }
+  const specialists = project.specialists.map(({ provenance: _provenance, ...definition }) => definition);
   let seed = suite.seed;
   const order = suite.tasks.flatMap((task) => Array.from({ length: suite.repetitions }, (_, repetition) =>
     (["baseline", "jev"] as const).map((variant) => ({ task, repetition, variant })))).flat();
@@ -92,12 +103,12 @@ export async function benchmark(project: Project, input: unknown, signal: AbortS
         await mkdir(path.dirname(filename), { recursive: true });
         await writeFile(filename, content, { mode: 0o600 });
       }
-      for (const [kind, items] of [["skills", project.skills], ["specialists", project.specialists]] as const) {
+      for (const [kind, items] of [["skills", skills], ["specialists", specialists]] as const) {
         for (const item of items) {
           await writeFile(path.join(root, ".jev", kind, `${item.id}.json`), JSON.stringify(item), { mode: 0o600 });
         }
       }
-      const instance = await loadProject(root);
+      const instance = await loadProject(root, { globalRoot: null });
       instance.instructions = project.instructions;
       for (const [relative, content] of Object.entries(trial.task.files)) {
         const filename = await instance.workspace.path(relative, true);

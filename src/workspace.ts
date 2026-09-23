@@ -6,7 +6,7 @@ import { BlockedError, isMissing } from "./errors.js";
 
 export const MAX_FILE_BYTES = 1_048_576;
 const hidden = new Set([
-  ".git", ".jev", ".jev-code", "node_modules", ".ssh", ".aws", ".gnupg",
+  ".git", ".jev", ".jev-code", ".claude", "node_modules", ".ssh", ".aws", ".gnupg",
   ".npmrc", ".netrc", ".pypirc", "id_rsa", "id_ed25519",
 ]);
 
