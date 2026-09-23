@@ -157,7 +157,7 @@ export async function fullscreenTerminal(project: Project): Promise<ChatTerminal
         suspended = false;
         fresh = false;
         if (closed) screen.destroy();
-        else { resetEditor(); screen.render(); }
+        else { screen.realloc(); resetEditor(); screen.render(); }
       }
     },
     close() {
