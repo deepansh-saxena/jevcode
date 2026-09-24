@@ -222,6 +222,43 @@ test("explicit specialist and skills are preserved and avoid unnecessary routing
   assert.deepEqual(result.route.skillIds, ["coding", "testing"]);
 });
 
+test("choice validation accepts bounded decimal rounding, logs drift, and rejects malformed distributions", async (t) => {
+  const cases = [
+    { probabilities: { a: 0.61, b: 0.19, c: 0.19 }, valid: true, rounded: true },
+    { probabilities: { a: 0.61, b: 0.2, c: 0.2 }, valid: true, rounded: true },
+    { probabilities: { a: 0.6, b: 0.2, c: 0.199 }, valid: true, rounded: false },
+    { probabilities: { a: 0.61, b: 0.2, c: 0.19 }, valid: true, rounded: false },
+    { probabilities: { a: 0.7, b: 0.16, c: 0.16 }, valid: false },
+    { probabilities: { a: 0.604, b: 0.2, c: 0.19 }, valid: false },
+    { probabilities: { a: 0, b: 0, c: 0 }, valid: false },
+    { probabilities: { a: 1, b: 1, c: 1 }, valid: false },
+    { probabilities: { a: 0.2, b: 0.7, c: 0.1 }, valid: false },
+    { probabilities: { a: 0.8, b: 0.2 }, valid: false },
+    { probabilities: { a: 0.8, b: 0.2, c: 0, extra: 0 }, valid: false },
+  ];
+  for (const entry of cases) {
+    const project = await fixture(t);
+    const endpoint = await server(t, (_request, response) => response.end(JSON.stringify({
+      model: "jev-test", answers: { route: { type: "choice", choice: "a", confidence: 0.5, probabilities: entry.probabilities } },
+      usage: { input_tokens: 5, output_tokens: 2 },
+    })));
+    const events: string[] = [];
+    const usage: unknown[] = [];
+    const client = new JevClient({ ...project.config.jev, endpoint, allowDataSharing: true }, "test",
+      event => events.push(event), value => usage.push(value));
+    const request = client.evaluate({}, { route: { type: "choice", instructions: "Choose", criteria: { a: "A", b: "B", c: "C" } } },
+      new AbortController().signal);
+    if (!entry.valid) await assert.rejects(request, /invalid choice distribution/);
+    else {
+      const result = await request;
+      assert.deepEqual(result.route, { type: "choice", choice: "a", confidence: 0.5, probabilities: entry.probabilities },
+        "Do not silently renormalize probabilities or reinterpret entropy-derived confidence");
+      assert.equal(events.includes("jev_probability_rounding"), entry.rounded);
+    }
+    assert.equal(usage.length, 1, "Invalid answers must still account for reported usage");
+  }
+});
+
 test("required semantic checks block on errors or uncertain judgments before approval", async (t) => {
   for (const verdict of ["uncertain", "outage", "missing-key"]) {
     const project = await fixture(t);

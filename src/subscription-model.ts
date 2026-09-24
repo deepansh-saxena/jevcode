@@ -172,11 +172,19 @@ export class SubscriptionModel implements CodingModel {
     return context;
   }
 
-  contextSize(messages: Message[], tools: ToolSpec[]): number {
+  private serializedContext(messages: Message[], tools: ToolSpec[]): string {
     const context = this.context(messages, tools);
     return JSON.stringify({ ...context, messages: context.messages.map((message) =>
       message.role === "user" && Array.isArray(message.content) ? { ...message, content: message.content.map((block) =>
-        block.type === "image" ? { ...block, data: " ".repeat(16_384) } : block) } : message) }).length;
+        block.type === "image" ? { ...block, data: " ".repeat(16_384) } : block) } : message) });
+  }
+
+  contextSize(messages: Message[], tools: ToolSpec[]): number {
+    return this.serializedContext(messages, tools).length;
+  }
+
+  inputByteLength(messages: Message[], tools: ToolSpec[]): number {
+    return Buffer.byteLength(this.serializedContext(messages, tools));
   }
 
   async ready(signal: AbortSignal): Promise<void> {

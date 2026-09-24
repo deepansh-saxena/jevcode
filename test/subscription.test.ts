@@ -192,6 +192,30 @@ test("context pruning preserves native signatures and uses provider-native size 
   }
 });
 
+test("native byte accounting preserves opaque history and allows a bounded finishing turn", async (t) => {
+  const project = await fixture(t);
+  project.config.llm.model = "gpt-5.4-mini";
+  await writeFile(path.join(project.workspace.root, "large.txt"), "x".repeat(20_000));
+  const response = native({ content: [
+    { type: "thinking", thinking: "\u6f22\ud83e\uddea", thinkingSignature: "s".repeat(20_000) },
+    { type: "toolCall", id: "read", name: "read_file", arguments: { path: "large.txt" } },
+  ], stopReason: "toolUse" });
+  let requests = 0;
+  const adapter = new SubscriptionModel(project.config.llm, "openai-codex", await auth(project.workspace.root),
+    async (_model, context) => {
+      if (requests++ === 0) return response;
+      assert.strictEqual(context.messages[1], response);
+      const bytes = Buffer.byteLength(JSON.stringify(context));
+      assert.ok(3 * JSON.stringify(context).length + 8192 > project.config.limits.maxTokens,
+        "Old triple-character accounting would reject this request");
+      assert.ok(bytes + 8192 < project.config.limits.maxTokens);
+      return native();
+    });
+  const result = await run(project, options(adapter));
+  assert.equal(result.status, "completed", result.text);
+  assert.equal(requests, 2);
+});
+
 test("OAuth transport ignores custom API URLs and never exposes provider error bodies", async (t) => {
   const project = await fixture(t);
   project.config.llm.baseUrl = "https://unrelated.example";

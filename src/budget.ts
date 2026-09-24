@@ -149,8 +149,14 @@ export function reserveModelRequest(budget: RunBudget, model: CodingModel, model
     const { images: _images, ...text } = message;
     return text;
   });
-  const textInputUpper = Math.max(Buffer.byteLength(JSON.stringify({ messages: textMessages, tools })),
-    model.contextSize ? 3 * model.contextSize(textMessages, tools) : 0) + 4096;
+  // Use actual UTF-8 bytes when available, not three bytes for every ASCII character.
+  // Native signatures remain included; adapters without byte accounting keep the conservative fallback.
+  const nativeBytes = model.inputByteLength?.(textMessages, tools) ??
+    (model.contextSize ? 3 * model.contextSize(textMessages, tools) : 0);
+  if (!Number.isSafeInteger(nativeBytes) || nativeBytes < 0) {
+    throw new LimitError("Coding adapter returned an invalid input byte bound");
+  }
+  const textInputUpper = Math.max(Buffer.byteLength(JSON.stringify({ messages: textMessages, tools })), nativeBytes) + 4096;
   return hasImages ? budget.reserveImageRequest(modelId, textInputUpper, maxOutputTokens) :
     budget.reserve("llm", modelId, textInputUpper, maxOutputTokens);
 }

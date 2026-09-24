@@ -132,6 +132,14 @@ Unreported requests retain their reservation and make aggregate cost unknown.
 Shared tool-call and specialist-run counters are never multiplied by concurrency.
 Conservative allocation may stop a specialist earlier than a sequential run.
 
+Built-in coding adapters reserve against actual UTF-8 bytes of their serialized
+input, including provider-native history and opaque signatures, plus protocol
+headroom and the output allowance. ASCII history is no longer charged a
+worst-case three bytes per character. This is still a conservative bound, not a
+tokenizer estimate; reported usage is reconciled and overshoot still stops work.
+Third-party adapters without `inputByteLength` retain the character-based
+fallback. Image inputs retain their separate conservative admission policy.
+
 `RunOptions.backgroundSpecialists: false` disables concurrent/background
 delegation while preserving sequential dynamic delegation.
 `dynamicCapabilities: false` removes dynamic delegation entirely.

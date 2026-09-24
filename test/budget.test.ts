@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { configSchema } from "../src/config.js";
-import { RunBudget } from "../src/budget.js";
+import { RunBudget, reserveModelRequest } from "../src/budget.js";
+import { OpenAICompatible, type Message } from "../src/llm.js";
 import { run } from "../src/runtime.js";
 import { fixture, options, scripted, final, call, server, requestBody } from "./helpers.js";
 
@@ -148,4 +149,34 @@ test("a supplied budget cannot silently bypass the run's configured limits or ra
   const result = await run(project, options({ async complete() { assert.fail("Mismatched budget must not run"); } }, { budget }));
   assert.equal(result.status, "limited");
   assert.match(result.text, /does not match/);
+});
+
+test("exact native bytes avoid triple-counting ASCII while retaining fallback and invalid-bound checks", () => {
+  const settings = config();
+  settings.limits.maxTokens = 30_000;
+  const model = { complete: async () => final(), contextSize: () => 15_000, inputByteLength: () => 15_000 };
+  const request = reserveModelRequest(new RunBudget(settings), model, "test", [], [], 1000);
+  request.settle({ inputTokens: 15_000, outputTokens: 1000 });
+  const { inputByteLength: _bytes, ...legacy } = model;
+  assert.throws(() => reserveModelRequest(new RunBudget(settings), legacy, "test", [], [], 1000), /token budget/);
+  for (const value of [-1, NaN, Infinity, 1.5]) {
+    assert.throws(() => reserveModelRequest(new RunBudget(settings),
+      { ...model, inputByteLength: () => value }, "test", [], [], 1000), /invalid input byte bound/);
+  }
+});
+
+test("byte reservations retain Unicode input, output headroom and reported usage enforcement", () => {
+  const settings = config();
+  const model = new OpenAICompatible(settings.llm, "test-key");
+  const messages: Message[] = [{ role: "user", content: "\u6f22\ud83e\uddea".repeat(500) }];
+  const bytes = Buffer.byteLength(JSON.stringify({ messages, tools: [] }));
+  assert.equal(model.inputByteLength(messages, []), bytes);
+  assert.ok(bytes > model.contextSize(messages, []));
+  settings.limits.maxTokens = bytes + 4096 + 100;
+  const budget = new RunBudget(settings);
+  const request = reserveModelRequest(budget, model, "test", messages, [], 100);
+  assert.throws(() => budget.reserve("llm", "test", 1, 1), /token budget/);
+  assert.throws(() => request.settle({ inputTokens: bytes + 4097, outputTokens: 100 }), /overshoot/);
+  settings.limits.maxTokens--;
+  assert.throws(() => reserveModelRequest(new RunBudget(settings), model, "test", messages, [], 100), /token budget/);
 });

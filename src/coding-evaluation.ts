@@ -92,6 +92,7 @@ export interface CodingBenchmarkOptions {
   allowVerifierCode?: boolean;
   model?: CodingModel;
   env?: NodeJS.ProcessEnv;
+  onTrialComplete?: (trial: CodingTrial) => void | Promise<void>;
 }
 
 class FixtureWorkspace extends Workspace {
@@ -168,6 +169,11 @@ export interface CodingTrial {
   changedPaths: string[];
   verifier: Verification | null;
   route: RunResult["route"] | null;
+  routingDecision: Record<string, unknown> | null;
+  specialistRuns: number;
+  specialistTurns: number;
+  skillLoads: number;
+  roundedDistributions: number;
   metrics: RunResult["metrics"] | null;
   wallMs: number;
   machineMs: number;
@@ -196,6 +202,10 @@ function summarize(trials: CodingTrial[]) {
       trial.metrics.llm.inputTokens + trial.metrics.llm.outputTokens +
       trial.metrics.jev.inputTokens + trial.metrics.jev.outputTokens : 0), 0),
     incompleteUsageTrials: trials.filter((trial) => !trial.metrics || trial.metrics.usageIncompleteRequests > 0).length,
+    specialistRuns: trials.reduce((sum, trial) => sum + trial.specialistRuns, 0),
+    specialistTurns: trials.reduce((sum, trial) => sum + trial.specialistTurns, 0),
+    skillLoads: trials.reduce((sum, trial) => sum + trial.skillLoads, 0),
+    roundedDistributions: trials.reduce((sum, trial) => sum + trial.roundedDistributions, 0),
     ...summarizeReportedCosts(trials.map((trial) => trial.metrics), trials.filter((trial) => trial.acceptancePassed).length),
   };
 }
@@ -242,6 +252,7 @@ export async function benchmarkCode(project: Project, input: unknown, signal: Ab
       taskId: task.id, repetition, variant, status: "fixture_error", acceptancePassed: false, integrityPassed: false,
       failureReasons: [], initialTreeHash: treeHash(task.files), finalTreeHash: null, changedPaths: [],
       verifier: null, route: null, metrics: null, wallMs: 0, machineMs: 0, approvalWaitMs: 0,
+      routingDecision: null, specialistRuns: 0, specialistTurns: 0, skillLoads: 0, roundedDistributions: 0,
       jevMs: 0, routingRequests: 0, fallbacks: 0, errors: [],
     };
     try {
@@ -251,13 +262,13 @@ export async function benchmarkCode(project: Project, input: unknown, signal: Ab
       const instance: Project = {
         workspace: new FixtureWorkspace(root, task.writablePaths), config: structuredClone(config),
         skills: structuredClone(skills), specialists: structuredClone(suite.capabilities.specialists),
-        instructions: suite.instructions,
+        instructions: `${suite.instructions}\n\nBenchmark fixture policy: edit only ${task.writablePaths.join(", ")} using write_file or replace_text. ` +
+          "Commands and capability creation are disabled. Fixed acceptance tests are run independently after your final response. " +
+          "Do not claim to have run those tests.",
       };
       instance.config.jev.mode = variant === "baseline" ? "off" : "on";
       const result = await run(instance, {
-        task: `${task.task}\n\nBenchmark fixture policy: edit only ${task.writablePaths.join(", ")} using write_file or replace_text. ` +
-          "Commands and capability creation are disabled. Fixed acceptance tests are run independently after your final response. " +
-          "Do not claim to have run those tests.",
+        task: task.task,
         permissions, signal,
         ...{ backgroundSpecialists: false },
         dynamicCapabilities: suite.dynamicCapabilities === "identical",
@@ -269,6 +280,11 @@ export async function benchmarkCode(project: Project, input: unknown, signal: Ab
             typeof action.details.path === "string" && task.writablePaths.includes(action.details.path);
         },
         emit(event, data) {
+          if (event === "routing") row.routingDecision = data ?? null;
+          if (event === "agent_started" && data?.specialist === true) row.specialistRuns++;
+          if (event === "llm_request" && data?.specialist === true) row.specialistTurns++;
+          if (event === "tool_completed" && data?.tool === "load_skill") row.skillLoads++;
+          if (event === "jev_probability_rounding") row.roundedDistributions++;
           if (event === "jev_request") row.routingRequests++;
           if (event === "jev_response" || event === "jev_error") row.jevMs += Number(data?.durationMs ?? 0);
           if (event === "routing_fallback") row.fallbacks++;
@@ -306,6 +322,7 @@ export async function benchmarkCode(project: Project, input: unknown, signal: Ab
       row.machineMs = Math.max(0, row.wallMs - row.approvalWaitMs);
     }
     trials.push(row);
+    await options.onTrialComplete?.(structuredClone(row));
   }
   const pairs = suite.tasks.flatMap((task) => Array.from({ length: suite.repetitions }, (_, repetition) => {
     const baseline = trials.find((trial) => trial.taskId === task.id && trial.repetition === repetition && trial.variant === "baseline");
@@ -329,6 +346,7 @@ export async function benchmarkCode(project: Project, input: unknown, signal: Ab
     policy: {
       permissions, dynamicCapabilities: suite.dynamicCapabilities,
       capabilityCreation: false, backgroundSpecialists: false,
+      routingInput: "original task only; fixture execution policy is in coding-agent system instructions",
       workspaceConfigCopied: false, workspaceFilesCopied: false,
       guardrail: "off", limits: config.limits, maxOutputTokens: config.llm.maxOutputTokens,
       approval: "automated exact fixture-path edits only; not normal run mode",

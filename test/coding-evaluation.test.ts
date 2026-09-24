@@ -91,6 +91,17 @@ test("all public fixtures reproduce exact assertion failures and their fixes exe
   }
 });
 
+test("the larger development suite preflights twelve tasks with identical capability access", async () => {
+  const suite = codingBenchmarkSchema.parse(JSON.parse(await readFile(
+    new URL("../examples/coding-benchmark-large.json", import.meta.url), "utf8")));
+  assert.equal(suite.tasks.length, 12);
+  assert.equal(suite.repetitions, 2);
+  assert.equal(suite.dynamicCapabilities, "identical");
+  const result = await preflightCodingBenchmark(suite, signal(), consent);
+  assert.equal(result.valid, true, JSON.stringify(result));
+  assert.equal(result.tasks.length, 12);
+});
+
 test("paired coding trials really edit fresh trees with identical policy, deterministic order and unknown prices", async (t) => {
   const project = await projectWithJev(t);
   const suite = await example();
@@ -123,6 +134,54 @@ test("paired coding trials really edit fresh trees with identical policy, determ
     rerun.trials.map((trial) => [trial.taskId, trial.repetition, trial.variant]));
   assert.equal(rerun.baseline.accepted, 6);
   assert.equal(rerun.jev.accepted, 6);
+});
+
+test("strict assertion aliases preserve regression counting and reject the original buggy implementation", async () => {
+  const suite = await example();
+  const task = suite.tasks.find(task => task.id === "retry-boundary-regression")!;
+  const replacement = structuredClone(fixes[task.id]!);
+  replacement["retry.test.cjs"] = replacement["retry.test.cjs"]!.replaceAll("assert.equal", "assert.strictEqual");
+  const result = await verifyCodingFixture({ ...task.files, ...replacement }, task.checks,
+    { ...suite.verifier, allowVerifierCode: true }, signal());
+  assert.equal(result.status, "passed", JSON.stringify(result));
+  const aliases = await verifyCodingFixture({}, [
+    { id: "equal", code: "const a=require('node:assert/strict'); a.strictEqual(1,1); a.deepStrictEqual([1],[1]); a.throws(()=>a.strictEqual(1,'1')); a.throws(()=>a.deepStrictEqual([1],['1']));" },
+  ], { ...suite.verifier, allowVerifierCode: true }, signal());
+  assert.equal(aliases.status, "passed", JSON.stringify(aliases));
+});
+
+test("benchmark routes the original task and keeps execution policy in system instructions", async (t) => {
+  const project = await projectWithJev(t);
+  const suite = await example();
+  suite.tasks = [suite.tasks[0]!];
+  suite.repetitions = 1;
+  project.config.jev.endpoint = await server(t, async (request, response) => {
+    const body = await requestBody(request);
+    assert.equal((body.state as { task: string }).task, suite.tasks[0]!.task);
+    assert.doesNotMatch(JSON.stringify(body.state), /Benchmark fixture policy/);
+    const questions = body.questions as Record<string, { type: string; criteria?: Record<string, string> }>;
+    response.end(JSON.stringify({ model: "jev-test", usage: { input_tokens: 2, output_tokens: 1 },
+      answers: Object.fromEntries(Object.entries(questions).map(([id, question]) => [id, question.type === "noul" ?
+        { type: "noul", noul: 0 } : { type: "choice", choice: "direct", confidence: 1,
+          probabilities: Object.fromEntries(Object.keys(question.criteria!).map(key => [key, key === "direct" ? 1 : 0])) }])) }));
+  });
+  const editor = editingModel(suite);
+  let observations = 0;
+  const report = await benchmarkCode(project, suite, signal(), { ...consent, env, model: {
+    complete: async (messages, ...args) => {
+      assert.match(messages[0]!.content!, /Benchmark fixture policy: edit only cart.cjs/);
+      assert.equal(messages.find(message => message.role === "user")!.content, suite.tasks[0]!.task);
+      return editor.complete(messages, ...args);
+    },
+  }, onTrialComplete: trial => {
+    observations++;
+    assert.equal(trial.verifier?.status, "passed");
+    trial.failureReasons.push("Observer mutation must not alter the saved report");
+  } });
+  assert.equal(observations, 2);
+  assert.equal(report.validComparison, true);
+  assert.ok(report.trials.every(trial => trial.acceptancePassed && trial.specialistRuns === 0));
+  assert.equal(report.trials.find(trial => trial.variant === "jev")!.routingDecision?.mode, "on");
 });
 
 test("confident answers, wrong patches, broken syntax, and empty generated tests never count as coding success", async (t) => {
@@ -318,6 +377,10 @@ test("delegation arm executes suite-owned specialists on the same model and shar
   const delegated = report.trials.find((trial) => trial.variant === "jev")!;
   assert.equal(delegated.route!.specialistId, "flow-investigator");
   assert.equal(delegated.metrics!.turns, 5);
+  assert.equal(delegated.specialistRuns, 1);
+  assert.equal(delegated.specialistTurns, 2);
+  assert.equal(report.jev.specialistRuns, 1);
+  assert.equal(report.baseline.specialistRuns, 0);
   assert.equal(report.trials.find((trial) => trial.variant === "baseline")!.metrics!.turns, 3);
 });
 

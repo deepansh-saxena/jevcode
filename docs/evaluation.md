@@ -19,6 +19,12 @@ npm run build
 node dist/cli.js benchmark-code examples/coding-benchmark.json --allow-verifier-code
 ```
 
+`examples/coding-benchmark-large.json` contains 12 synthetic development tasks,
+two repetitions per arm (48 live trials), and identical model-driven skill and
+delegation tools in both arms. It adds pagination, TTL caches, layered config,
+dependency graphs, CSV parsing, inventory, weighted aggregation, event
+projection, and interval merging. It is not a held-out repository-scale suite.
+
 For offline fixture validation without project configuration, model credentials,
 Jev, or provider calls:
 
@@ -65,6 +71,11 @@ are copied. Specialist model overrides and commands are forbidden.
 Jev routing differs between arms. Semantic guardrails are off in both arms;
 guardrail evaluation remains a separate command.
 
+Jev receives the original task, not the benchmark's edit/verification footer.
+The footer is supplied as mandatory coding-agent instructions instead; execution
+permissions and writable-path checks are still enforced independently. Routing
+receives the same structured permission and budget context as ordinary runs.
+
 `dynamicCapabilities: "off"` disables model-driven capability discovery,
 loading, creation, and delegation in both arms. `"identical"` enables the same
 runtime discovery/loading/delegation tools in both arms under the feature
@@ -96,7 +107,8 @@ The JSON schema is exported as `codingBenchmarkSchema` from
 
 Acceptance code can `require('./relative-file.cjs')` from the source snapshot
 (explicit extensions required) and `require('node:assert/strict')`. The
-assertion interface exposes `equal`, `deepEqual`, `ok`, and `throws`. Fixture
+assertion interface exposes `equal`/`strictEqual`, `deepEqual`/`deepStrictEqual`,
+`ok`, and `throws`; the equality aliases all use strict Node assertion semantics. Fixture
 modules can import only other relative fixture modules, not Node built-ins.
 Each check gets fresh module state. Async checks are unsupported; a returned
 promise is an error. Tests should use synchronous assertions and primitive
@@ -124,7 +136,14 @@ failures even if they happened to write a passing patch.
 
 The report includes initial/final tree hashes, suite/config/capability hashes,
 runtime policy version, actual routes, errors, fallback counts, token usage,
-per-check results, and paired outcomes. Jev outages/fallbacks remain visible;
+per-check results, and paired outcomes. `routingDecision` records intake scores
+and the delegation choice/confidence, including below-threshold suggestions.
+`specialistRuns` and `specialistTurns` count actual agent starts/requests,
+including model-triggered delegation; `skillLoads` counts dynamic loads.
+Zero specialist runs is not evidence of delegation savings. The optional
+`onTrialComplete` API callback receives an isolated snapshot after each trial
+for incremental report persistence.
+Jev outages/fallbacks remain visible;
 their patches may pass acceptance, but the comparison is not valid evidence
 about functioning Jev routing. A Jev arm with no routing request is also invalid.
 

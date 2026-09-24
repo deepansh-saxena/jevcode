@@ -75,11 +75,20 @@ export class JevClient {
         if (!answer || answer.type !== question.type) throw new Error("Jev returned a missing or mismatched answer");
         if (question.type === "choice" && answer.type === "choice") {
           const keys = Object.keys(question.criteria);
-          const sum = Object.values(answer.probabilities).reduce((a, b) => a + b, 0);
+          const values = Object.values(answer.probabilities);
+          const sum = values.reduce((a, b) => a + b, 0);
+          // Live Jev responses round to two decimals; do not silently renormalize them.
+          const twoDecimalValues = values.every((value) => Math.abs(value * 100 - Math.round(value * 100)) < 1e-10);
+          const tolerance = twoDecimalValues ? Math.min(0.01, keys.length * 0.005) : 0.001;
           if (!keys.includes(answer.choice) ||
             Object.keys(answer.probabilities).length !== keys.length ||
-            keys.some((key) => !Object.hasOwn(answer.probabilities, key)) || Math.abs(sum - 1) > 0.001) {
-            throw new Error("Jev returned an invalid choice distribution");
+            keys.some((key) => !Object.hasOwn(answer.probabilities, key)) ||
+            Math.abs(sum - 1) > tolerance + 1e-12 ||
+            answer.probabilities[answer.choice]! < Math.max(...values)) {
+            throw new Error(`Jev returned an invalid choice distribution (probability total ${sum}; ${values.length}/${keys.length} options).`);
+          }
+          if (Math.abs(sum - 1) > 0.001 + 1e-12) {
+            this.emit("jev_probability_rounding", { optionCount: keys.length, sum, tolerance });
           }
         }
       }

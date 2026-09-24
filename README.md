@@ -502,6 +502,10 @@ into one intake request. Mandatory skills are not optional candidates. Low
 delegation confidence or abstention keeps execution with the main agent. Invalid
 answers, missing credentials, HTTP failures, and timeouts produce a visible
 `routing_fallback` event and retain mandatory/explicit skills and manual choices.
+Choice validation accepts at most one percentage point of drift for complete
+two-decimal probability distributions, with a visible `jev_probability_rounding`
+event. It does not renormalize values or change confidence thresholds; missing
+options, invalid scores, and choices that are not highest-probability still fail.
 Jev and the API-key adapter do not automatically retry requests. Optional
 `routeSkills: false` or `routeSpecialists: false` disables that decision
 independently for controlled comparisons. Follow-up routing includes up to three

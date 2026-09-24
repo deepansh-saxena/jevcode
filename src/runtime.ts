@@ -19,7 +19,7 @@ import { requireImageSupport, type ImageAttachment } from "./media.js";
 import { ExecutionSession } from "./lifecycle.js";
 import { reserveModelRequest, RunBudget } from "./budget.js";
 
-export const RUNTIME_POLICY_VERSION = "6";
+export const RUNTIME_POLICY_VERSION = "7";
 
 export const specialistReportSchema = z.object({
   summary: z.string().min(1).max(8_000),
@@ -338,7 +338,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
       }
       let specs = toolSpecs(tools);
       emit("agent_started", {
-        role, skills: skills.ids, tools: tools.map((tool) => tool.name),
+        role, specialist: Boolean(specialist), skills: skills.ids, tools: tools.map((tool) => tool.name),
         model: specialist?.model ?? project.config.llm.model, promptHash: digest(prompt),
         skillVersions: Object.fromEntries(project.skills.filter((skill) => skills.ids.includes(skill.id)).map((skill) => [skill.id, skill.version])),
       });
@@ -379,7 +379,7 @@ export async function run(project: Project, options: RunOptions): Promise<RunRes
         turns++;
         metrics.turns = budget.turns;
         const requestStarted = performance.now();
-        emit("llm_request", { role, turn: metrics.turns, contextChars });
+        emit("llm_request", { role, specialist: Boolean(specialist), turn: metrics.turns, contextChars });
         metrics.usageIncompleteRequests++;
         const completion = await model.complete(messages, specs, modelId, agentSignal,
           specialist ? undefined : options.onText).catch((error: unknown) => { reservation.fail(); throw error; });

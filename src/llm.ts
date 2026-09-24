@@ -33,6 +33,7 @@ export interface CodingModel {
   supportsImages?(model: string): boolean;
   complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal, onText?: (text: string) => void): Promise<Completion>;
   contextSize?(messages: Message[], tools: ToolSpec[]): number;
+  inputByteLength?(messages: Message[], tools: ToolSpec[]): number;
   exportHistory?(messages: Message[]): unknown;
   restoreHistory?(messages: Message[], history: unknown): void;
 }
@@ -76,6 +77,10 @@ export class OpenAICompatible implements CodingModel {
 
   contextSize(messages: Message[], tools: ToolSpec[]): number {
     return JSON.stringify({ messages: contextMessages(messages), tools }).length;
+  }
+
+  inputByteLength(messages: Message[], tools: ToolSpec[]): number {
+    return Buffer.byteLength(JSON.stringify({ messages: contextMessages(messages), tools }));
   }
 
   async complete(messages: Message[], tools: ToolSpec[], model: string, signal: AbortSignal, onText?: (text: string) => void): Promise<Completion> {

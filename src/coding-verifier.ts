@@ -65,7 +65,9 @@ for (const check of input.checks) {
     };
     const assertions = Object.freeze({
       equal: (...args) => assert.equal(...args),
+      strictEqual: (...args) => assert.strictEqual(...args),
       deepEqual: (...args) => assert.deepEqual(...args),
+      deepStrictEqual: (...args) => assert.deepStrictEqual(...args),
       ok: (...args) => assert.ok(...args),
       throws: (...args) => assert.throws(...args)
     });

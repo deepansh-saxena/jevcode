@@ -63,7 +63,7 @@
     },
     {
       "id": "retry-boundary-regression",
-      "task": "Fix canRetry(attempt, maxAttempts): attempt is zero-based, so retries are allowed only while attempt < maxAttempts. Add meaningful regression assertions to retry.test.cjs, whose CommonJS export must be a synchronous function regression(assert, canRetry). Use the injected assertion API and injected canRetry function, not an imported implementation, so the harness can check your regression against the original bug. Cover (2,3), (3,3), and (0,0); preserve the implementation's named export.",
+      "task": "Fix canRetry(attempt, maxAttempts): attempt is zero-based, so retries are allowed only while attempt < maxAttempts. Add meaningful regression assertions to retry.test.cjs, whose CommonJS export must be a synchronous function regression(assert, canRetry). Use injected assert.equal (or its strictEqual alias) and the injected canRetry function, not an imported implementation, so the harness can check your regression against the original bug. Cover (2,3), (3,3), and (0,0); preserve the implementation's named export.",
       "files": {
         "retry.cjs": "\"use strict\";\nfunction canRetry(attempt, maxAttempts) {\n  return attempt <= maxAttempts;\n}\nmodule.exports = { canRetry };\n",
         "retry.test.cjs": "\"use strict\";\nmodule.exports = function regression(assert, canRetry) {\n  // Add boundary regression assertions here.\n};\n"
@@ -81,7 +81,7 @@
         },
         {
           "id": "regression-scope",
-          "code": "const assert = require('node:assert/strict');\nconst regression = require('./retry.test.cjs');\nconst { canRetry } = require('./retry.cjs');\nassert.equal(typeof regression, 'function');\nconst observed = [];\nlet assertions = 0;\nconst api = Object.freeze({equal: (...args) => { assertions++; assert.equal(...args); }});\nregression(api, (attempt, max) => { observed.push([attempt,max]); return canRetry(attempt,max); });\nassert.ok(assertions >= 3, 'At least three behavioral assertions are required');\nfor (const pair of [[2,3],[3,3],[0,0]]) assert.ok(observed.some(([a,b]) => a === pair[0] && b === pair[1]), 'Missing boundary input');"
+          "code": "const assert = require('node:assert/strict');\nconst regression = require('./retry.test.cjs');\nconst { canRetry } = require('./retry.cjs');\nassert.equal(typeof regression, 'function');\nconst observed = [];\nlet assertions = 0;\nconst equal = (...args) => { assertions++; assert.equal(...args); };\nconst api = Object.freeze({equal, strictEqual: equal});\nregression(api, (attempt, max) => { observed.push([attempt,max]); return canRetry(attempt,max); });\nassert.ok(assertions >= 3, 'At least three behavioral assertions are required');\nfor (const pair of [[2,3],[3,3],[0,0]]) assert.ok(observed.some(([a,b]) => a === pair[0] && b === pair[1]), 'Missing boundary input');"
         },
         {
           "id": "regression-rejects-original",
